@@ -1,0 +1,46 @@
+@baseUrl = http://127.0.0.1:8000
+@jobId = replace-with-job-id
+
+### 健康检查
+GET {{baseUrl}}/health
+
+### 创建通用 GIS 任务
+POST {{baseUrl}}/v1/geo/jobs
+Content-Type: application/json
+
+{
+  "user_query": "请以北京市朝阳区某点为中心生成 500 米缓冲区，并说明结果",
+  "use_live_llm": false
+}
+
+### 查询任务状态
+GET {{baseUrl}}/v1/geo/jobs/{{jobId}}
+
+### 获取正式结果
+GET {{baseUrl}}/v1/geo/jobs/{{jobId}}/result
+
+### 创建复合空间分析任务
+POST {{baseUrl}}/v1/geo/jobs
+Content-Type: application/json
+
+{
+  "user_query": "对给定 AOI 生成 1 公里缓冲区，并与限制区做相交分析",
+  "region_or_aoi": {
+    "bbox": [116.30, 39.85, 116.50, 40.00],
+    "crs": "EPSG:4326"
+  },
+  "use_live_llm": false
+}
+
+### 新能源选址任务（需满足项目数据与 Provider 条件）
+POST {{baseUrl}}/v1/geo/jobs
+Content-Type: application/json
+
+{
+  "user_query": "在指定区域内评估光伏候选地，综合地形、土地覆盖和水体约束",
+  "region_or_aoi": {
+    "bbox": [103.00, 37.60, 103.10, 37.70],
+    "crs": "EPSG:4326"
+  },
+  "use_live_llm": false
+}

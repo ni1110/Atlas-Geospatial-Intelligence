@@ -1,0 +1,13 @@
+project_root: ${PROJECT_ROOT}
+data_dir: ${PROJECT_ROOT}/data
+cache_dir: ${PROJECT_ROOT}/cache
+runtime_dir: ${PROJECT_ROOT}/runtime/canonical
+artifacts_dir: ${PROJECT_ROOT}/artifacts
+logs_dir: ${PROJECT_ROOT}/logs
+state_dir: ${PROJECT_ROOT}/state
+temp_dir: ${PROJECT_ROOT}/temp
+models_dir: ${PROJECT_ROOT}/models
+downloads_dir: ${PROJECT_ROOT}/downloads
+database_path: ${PROJECT_ROOT}/state/renewable_site_jobs.sqlite3
+max_cache_size_gb: 15
+min_free_disk_gb: 10

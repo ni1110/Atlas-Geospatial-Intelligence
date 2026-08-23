@@ -1,0 +1,110 @@
+[general]
+name=OpenGeoAgent
+qgisMinimumVersion=3.28
+qgisMaximumVersion=4.99
+description=GeoAgent-powered multimodal AI chatbot for QGIS projects.
+version=1.8.2
+author=Qiusheng Wu
+email=giswqs@gmail.com
+
+about=OpenGeoAgent provides a dockable multimodal chatbot interface for QGIS that builds on GeoAgent's QGIS tool surface.
+
+    Features:
+    - Dockable chat panel for asking questions about the current QGIS project
+    - QGIS-safe GeoAgent tools for layer inspection, map navigation, data loading, selection, processing, and project operations
+    - Confirmation-gated PyQGIS script execution fallback for QGIS API tasks without a dedicated tool
+    - Provider and model controls for Bedrock, OpenAI, ChatGPT/Codex OAuth, Anthropic, Google Gemini, Ollama, and LiteLLM
+    - Voice prompt recording with OpenAI speech-to-text transcription into the chat editor
+    - Image-aware chat with clipboard paste support for providers and models that support vision inputs
+    - Screenshot attachments from the map canvas, selected map regions, the QGIS window, and selected screen regions
+    - Clickable image previews with save/export actions
+    - Copy Markdown transcript and copy executed PyQGIS script actions
+    - Sample prompts, prompt history with Up/Down, and Ctrl+Enter sending
+    - Settings panel for API keys, hosts, model defaults, and workflow dependency status
+    - One-click dependency installer using uv with an isolated virtual environment
+    - STAC mode for collection listing, item search, asset inspection, and QGIS raster loading
+    - Lazy startup checks to keep opening the chat dock responsive
+    - GitHub update checker
+    - Local installation and packaging scripts
+
+    Requirements:
+    - GeoAgent and provider/workflow clients, installable from Settings > Dependencies
+    - QGIS Python 3.11 or newer
+    - OPENAI_API_KEY for voice transcription, which uses the OpenAI transcription API and may incur API costs
+
+tracker=https://github.com/opengeos/GeoAgent/issues
+repository=https://github.com/opengeos/GeoAgent
+
+hasProcessingProvider=no
+
+tags=ai, agent, qgis, geospatial, chatbot, geoagent, llm, gemini, pyqgis, vision, multimodal, screenshot
+
+homepage=https://github.com/opengeos/GeoAgent
+category=Plugins
+icon=icons/icon.svg
+
+experimental=False
+deprecated=False
+
+changelog=
+    1.8.2 - Patch release
+        - Raised package and plugin version metadata to 1.8.2
+
+    1.8.1 - Patch release
+        - Raised package and plugin version metadata to 1.8.1
+
+    1.8.0 - Minor release
+        - Raised package and plugin version metadata to 1.8.0
+        - Raised the plugin dependency guidance to GeoAgent 1.8.0
+
+    1.7.2 - Patch release
+        - Raised package and plugin version metadata to 1.7.2
+        - Raised the plugin dependency guidance to GeoAgent 1.7.2
+
+    1.7.1 - Patch release
+        - Raised package and plugin version metadata to 1.7.1
+        - Raised the plugin dependency guidance to GeoAgent 1.7.1
+
+    1.7.0 - Minor update for Timelapse ESRI Wayback support
+        - Added Timelapse agent routing for high-resolution and ESRI Wayback requests
+        - Raised the plugin dependency guidance to GeoAgent 1.7.0
+
+    1.6.0 - Minor update for provider token defaults
+        - Added Auto max-token behavior so providers can use their native defaults
+        - Improved Gemini token-limit handling and diagnostics
+
+    1.5.0 - Minor update for macOS dependency installation
+        - Improved dependency installer Python detection for macOS QGIS app bundles
+        - Raised the plugin dependency guidance to GeoAgent 1.5.0
+
+    1.4.1 - Patch update for GEE Data Catalogs styling
+        - Raised the plugin dependency guidance to GeoAgent 1.4.1
+
+    1.4.0 - Updated GeoAgent package dependency
+        - Raised the plugin dependency guidance to GeoAgent 1.4.0
+
+    1.2.0 - Added direct image generation support
+        - Added OpenAI Images API tool integration for direct image generation
+        - Added clickable generated-image thumbnails with full-resolution preview
+        - Added image model selection and optional OpenAI org/project settings
+        - Improved voice/API-key environment fallback handling
+
+    1.1.0 - Improved voice input controls
+        - Added configurable OpenAI transcription model selection
+        - Added microphone button, voice shortcut, and recording/transcription indicators
+        - Improved voice transcription status handling and prompt insertion behavior
+
+    1.0.0 - Initial stable OpenGeoAgent release
+        - Added clipboard image paste support for chat attachments
+        - Added voice prompt recording with OpenAI speech-to-text transcription
+        - Added screenshot capture for map canvas, selected map regions, QGIS window, and selected screen regions
+        - Added image preview, save, and export actions
+        - Added confirmation-gated PyQGIS script execution fallback
+        - Added copy Markdown transcript and copy executed PyQGIS script actions
+        - Improved chat dock startup with lazy imports and lightweight dependency checks
+
+    0.1.0 - Initial OpenGeoAgent plugin
+        - Added GeoAgent-backed QGIS chat dock
+        - Added provider/model settings and credential fields
+        - Added one-click dependency installer
+        - Added update checker and packaging scripts

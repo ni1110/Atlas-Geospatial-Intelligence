@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Renewable Site Screening Report — {{ job_id }}</title>
+  <style>
+    :root { --ink:#17212b; --muted:#5f6b76; --line:#d9e0e6; --panel:#f7f9fb; --candidate:#5aae61; --water:#3182bd; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#eef2f5; color:var(--ink); font-family:Arial,Helvetica,sans-serif; line-height:1.5; }
+    main { width:min(1180px,calc(100% - 32px)); margin:24px auto 48px; background:#fff; border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 28px rgba(23,33,43,.08); overflow:hidden; }
+    header { padding:30px 34px; color:#fff; background:linear-gradient(135deg,#143d59,#1f6a92); }
+    header h1 { margin:0 0 4px; font-size:30px; }
+    header p { margin:3px 0; opacity:.92; }
+    section { padding:24px 34px; border-top:1px solid var(--line); }
+    h2 { margin:0 0 16px; font-size:21px; color:#143d59; }
+    h3 { margin:18px 0 10px; font-size:16px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; }
+    .card { padding:14px 16px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+    .card .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    .card .value { margin-top:4px; font-size:20px; font-weight:700; }
+    .warning { padding:14px 16px; border-left:5px solid #d77d00; background:#fff4df; color:#8a4b08; border-radius:6px; font-weight:600; }
+    table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+    th,td { border:1px solid var(--line); padding:8px 9px; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+    th { background:#edf3f7; color:#243746; }
+    code { font-family:Consolas,"Courier New",monospace; font-size:12px; }
+    .status-completed { color:#226b35; font-weight:700; }
+    .status-pending { color:#9a5a00; font-weight:700; }
+    .status-not-requested { color:var(--muted); }
+    .map-wrap { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#111820; }
+    .legend { display:flex; flex-wrap:wrap; gap:16px; margin-top:10px; color:var(--muted); font-size:13px; }
+    .swatch { width:18px; height:12px; border:1px solid rgba(0,0,0,.25); display:inline-block; margin-right:6px; vertical-align:-1px; }
+    .small { color:var(--muted); font-size:12px; }
+    footer { padding:18px 34px 26px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); }
+    @media print { body{background:#fff} main{width:100%;margin:0;border:0;box-shadow:none} section{break-inside:avoid} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Renewable Site Screening Report</h1>
+    <p>可再生能源场址初步筛选报告</p>
+    <p><strong>Job ID:</strong> {{ job_id }} · <strong>Status:</strong> {{ job_status }}</p>
+  </header>
+  <section><div class="warning">This report documents a preliminary non-water screening stage only. The polygons are not approved, qualified, or recommended renewable-energy sites.</div></section>
+  <section>
+    <h2>1. Request and structured constraints</h2>
+    <h3>Original request</h3><div class="card">{{ request_text }}</div>
+    <h3>Structured request</h3>
+    <table><tbody>{% for row in request_rows %}<tr><th>{{ row.label }}</th><td>{{ row.value }}</td><td>{{ row.provenance }}</td></tr>{% endfor %}</tbody></table>
+  </section>
+  <section>
+    <h2>2. Screening status</h2>
+    <table><thead><tr><th>Screening item</th><th>Status</th><th>Basis / current result</th></tr></thead><tbody>
+    {% for row in screening_rows %}<tr><td>{{ row.item }}</td><td class="status-{{ row.css_class }}">{{ row.status }}</td><td>{{ row.note }}</td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+  <section>
+    <h2>3. Key results</h2>
+    <div class="grid">{% for card in result_cards %}<div class="card"><div class="label">{{ card.label }}</div><div class="value">{{ card.value }}</div></div>{% endfor %}</div>
+    <p class="small">The raw summed water-feature area may exceed the net excluded area because overlapping water features are unioned before subtraction.</p>
+  </section>
+  <section>
+    <h2>4. Static map preview</h2><div class="map-wrap">{{ map_svg | safe }}</div>
+    <div class="legend"><span><i class="swatch" style="background:#5aae61"></i>Preliminary candidates</span><span><i class="swatch" style="background:#3182bd"></i>Excluded water</span><span><i class="swatch" style="background:#fff;border:3px solid #17365d"></i>Administrative boundary</span></div>
+    <p class="small">Visualization uses simplified preview geometries only. Full-resolution evidence files remain authoritative for analysis and audit.</p>
+  </section>
+  <section>
+    <h2>5. Candidate statistics</h2>
+    <div class="grid">{% for card in candidate_cards %}<div class="card"><div class="label">{{ card.label }}</div><div class="value">{{ card.value }}</div></div>{% endfor %}</div>
+    <h3>Top candidates by current area ranking</h3>
+    <table><thead><tr><th>Rank</th><th>Candidate ID</th><th>Area (km²)</th><th>Centroid</th><th>Stage</th><th>Status</th></tr></thead><tbody>
+    {% for item in top_candidates %}<tr><td>{{ item.rank }}</td><td><code>{{ item.candidate_id }}</code></td><td>{{ item.area_km2 }}</td><td>{{ item.centroid }}</td><td>{{ item.stage }}</td><td>{{ item.screening_status }}</td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+  <section>
+    <h2>6. Evidence and traceability</h2>
+    <table><thead><tr><th>Evidence type</th><th>Provider</th><th>Source identifier</th><th>License</th><th>Retrieved at</th><th>SHA-256</th><th>Artifact</th></tr></thead><tbody>
+    {% for item in evidence_rows %}<tr><td>{{ item.evidence_type }}</td><td>{{ item.provider }}</td><td><code>{{ item.source_identifier }}</code></td><td>{{ item.source_license }}</td><td>{{ item.retrieved_at }}</td><td><code>{{ item.checksum_sha256 }}</code></td><td><code>{{ item.artifact_path }}</code></td></tr>{% endfor %}
+    </tbody></table>
+  </section>
+  <section>
+    <h2>7. Reproducibility record</h2>
+    <table><tbody><tr><th>Generator version</th><td>{{ generator_version }}</td></tr><tr><th>Deterministic report timestamp</th><td>{{ generated_at }}</td></tr><tr><th>Metric CRS</th><td>{{ metric_crs }}</td></tr><tr><th>Map simplification tolerance</th><td>{{ tolerance_m }} m</td></tr><tr><th>Full-resolution input size</th><td>{{ source_total_mb }} MB</td></tr><tr><th>Map-preview size</th><td>{{ preview_total_mb }} MB</td></tr><tr><th>Preview reduction</th><td>{{ reduction_percent }}%</td></tr></tbody></table>
+  </section>
+  <section><h2>8. Required next screening stages</h2><p>Before any site can be described as qualified or recommended, the workflow must still evaluate slope, protected areas, prime farmland / land use, distance to substations, grid connection, roads, settlements, and any applicable national, local, or enterprise rules.</p></section>
+  <footer>Generated deterministically from persisted job data and verified evidence artifacts. Same inputs, template, and dependency versions should reproduce the same report bytes.</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,4434 @@
+"""Dockable OpenGeoAgent chat interface."""
+
+import asyncio
+import base64
+import hashlib
+import os
+import html
+import importlib
+import array
+import json
+import re
+import sys
+import tempfile
+import time
+import traceback
+import wave
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from qgis.core import Qgis, QgsMessageLog
+from qgis.PyQt.QtCore import (
+    QByteArray,
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QObject,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    QSettings,
+    QThread,
+    QTimer,
+    pyqtSignal,
+)
+from qgis.PyQt.QtGui import (
+    QCursor,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QMovie,
+    QPixmap,
+    QTextCursor,
+)
+from qgis.PyQt.QtWidgets import (
+    QCheckBox,
+    QAbstractItemView,
+    QHeaderView,
+    QComboBox,
+    QDialog,
+    QDockWidget,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QPlainTextEdit,
+    QRubberBand,
+    QScrollArea,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+
+SETTINGS_PREFIX = "OpenGeoAgent/"
+DEFAULT_PROVIDER = "openai-codex"
+MAX_TOKENS_AUTO_VALUE = 0
+DEFAULT_MODELS = {
+    "bedrock": "us.anthropic.claude-sonnet-4-6",
+    "openai": "gpt-5.5",
+    "openai-codex": "gpt-5.5",
+    "anthropic": "claude-sonnet-4-6",
+    "gemini": "gemini-3.1-pro-preview",
+    "ollama": "qwen3.5:4b",
+    "litellm": "openai/gpt-5.5",
+    "openrouter": "deepseek/deepseek-chat",
+    "vllm": "",
+}
+PROVIDERS = [
+    "anthropic",
+    "bedrock",
+    "gemini",
+    "litellm",
+    "ollama",
+    "openai",
+    "openai-codex",
+    "openrouter",
+    "vllm",
+]
+MAX_CONTEXT_MESSAGES = 12
+MAX_CONTEXT_CHARS = 12000
+MAX_IMAGE_ATTACHMENTS = 4
+MAX_IMAGE_EDGE = 1568
+IMAGE_THUMBNAIL_SIZE = 72
+MAX_OUTPUT_IMAGE_DISPLAY_EDGE = 480
+OUTPUT_IMAGE_THUMBNAIL_EDGE = 180
+OUTPUT_IMAGE_PATH_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z]:[\\/]|/|~/?)[^\s`'\"<>]+\.(?:png|jpe?g|webp|gif))",
+    re.IGNORECASE,
+)
+DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+DEFAULT_VOICE_SHORTCUT = "Ctrl+Alt+Space"
+VOICE_SHORTCUT_SETTING = "voice_shortcut_v2"
+DEFAULT_IMAGE_MODEL = "gpt-image-2"
+IMAGE_MODELS = [
+    "gpt-image-2",
+    "gpt-image-1",
+]
+TRANSCRIPTION_MODELS = [
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-transcribe",
+]
+SAMPLE_PROMPTS = [
+    "Summarize the current QGIS project layers, CRS, extents, and feature counts.",
+    "Zoom to the active layer and describe what it contains.",
+    (
+        "List visible layers and identify any layers with no features or "
+        "invalid data sources."
+    ),
+    "Add an OpenStreetMap basemap and zoom to the project extent.",
+    (
+        "Inspect the active vector layer fields and suggest useful styling or "
+        "labeling options."
+    ),
+    (
+        "Select features in the active layer where population is greater than "
+        "100000, then zoom to the selected features."
+    ),
+    (
+        "Run a buffer around the active layer by 1000 meters and add the "
+        "output to the project."
+    ),
+    "Find a WhiteboxTools command for calculating slope from the active DEM layer.",
+    "Run a WhiteboxTools hillshade analysis on a local DEM and add the result to QGIS.",
+    "Search WhiteboxTools for watershed or flow accumulation tools.",
+    "Use GeoAI SamGeo to segment buildings in the active raster layer.",
+    "Create a concise map QA checklist for this project before I export it.",
+]
+AGENT_MODES = [
+    "General QGIS",
+    "GEE Data Catalogs",
+    "GeoAI",
+    "HyperCoast",
+    "NASA Earthdata",
+    "NASA OPERA",
+    "STAC",
+    "Timelapse",
+    "Vantor",
+    "WhiteboxTools",
+]
+DEFAULT_AGENT_MODE = "General QGIS"
+PERMISSION_PROFILES = [
+    "Trusted auto-approve",
+    "Inspect only",
+    "Edit layers",
+    "Run processing",
+    "Execute Scripts",
+]
+PERMISSION_PROFILE_ALIASES = {
+    "Execute PyQGIS": "Execute Scripts",
+}
+DEFAULT_PERMISSION_PROFILE = "Inspect only"
+WORKFLOW_PROMPTS = {
+    "NASA Earthdata": [
+        (
+            "Search NASA Earthdata for datasets about surface water in the "
+            "current map extent."
+        ),
+        (
+            "Search NASA Earthdata granules for the selected dataset, display "
+            "footprints, and summarize available raster links."
+        ),
+    ],
+    "NASA OPERA": [
+        "List available NASA OPERA datasets and recommend one for water mapping.",
+        (
+            "Search OPERA DSWx data for the current map extent and display "
+            "matching footprints."
+        ),
+    ],
+    "GEE Data Catalogs": [
+        (
+            "Search the Earth Engine data catalog for Sentinel-2 surface "
+            "reflectance datasets."
+        ),
+        (
+            "Find a dataset for land cover mapping and explain how it can be "
+            "loaded into QGIS."
+        ),
+    ],
+    "STAC": [
+        (
+            "Guide me through searching a STAC catalog for imagery over the "
+            "current map extent."
+        ),
+        (
+            "Check STAC-related dependencies and outline the steps to add a "
+            "STAC raster layer in QGIS."
+        ),
+    ],
+    "Timelapse": [
+        (
+            "Create a high-resolution ESRI Wayback timelapse for the current "
+            "map extent from 2014 to the present."
+        ),
+        (
+            "List the available timelapse imagery types and recommend one for "
+            "vegetation change."
+        ),
+    ],
+    "Vantor": [
+        "List available Vantor Open Data events and summarize the newest results.",
+        (
+            "Search Vantor imagery for the current map extent and display "
+            "matching footprints."
+        ),
+    ],
+    "GeoAI": [
+        (
+            "Segment buildings in the active raster layer with GeoAI SamGeo "
+            "and add the mask to QGIS."
+        ),
+        (
+            "Use GeoAI to segment trees from the raster layer named Imagery "
+            "and add the raster mask to QGIS."
+        ),
+    ],
+    "HyperCoast": [
+        ("Search HyperCoast for EMIT hyperspectral data in the current " "map extent."),
+        (
+            "Load a true-color HyperCoast RGB visualization from a local "
+            "hyperspectral file."
+        ),
+    ],
+}
+
+
+def _all_sample_prompts():
+    """Return general sample prompts plus guided workflow prompts."""
+    prompts = list(SAMPLE_PROMPTS)
+    for mode_prompts in WORKFLOW_PROMPTS.values():
+        prompts.extend(mode_prompts)
+    return prompts
+
+
+def _permission_allows_tool(permission_profile, tool_name, meta=None):
+    """Return whether a QGIS-related tool may be exposed for a profile."""
+    profile = permission_profile or DEFAULT_PERMISSION_PROFILE
+    name = str(tool_name or "")
+    category = str(getattr(meta, "category", "") or "")
+    requires_confirmation = bool(getattr(meta, "requires_confirmation", False))
+    destructive = bool(getattr(meta, "destructive", False))
+    long_running = bool(getattr(meta, "long_running", False))
+
+    if profile == "Trusted auto-approve":
+        return True
+    profile = PERMISSION_PROFILE_ALIASES.get(profile, profile)
+    if profile == "Execute Scripts":
+        return True
+    if name == "run_pyqgis_script":
+        return False
+    if profile == "Run processing":
+        return True
+    if category in {
+        "whitebox",
+        "nasa_earthdata",
+        "nasa_opera",
+        "gee_data_catalogs",
+        "timelapse",
+        "vantor",
+        "geoai",
+        "hypercoast",
+    }:
+        return profile in {"Run processing", "Execute Scripts", "Trusted auto-approve"}
+    if profile == "Edit layers":
+        return not destructive and name != "run_processing_algorithm"
+    return not (requires_confirmation or destructive or long_running)
+
+
+def _filter_tools_for_permission(agent, permission_profile):
+    """Filter an agent's tool surface when the core factory lacks profile support."""
+    try:
+        registry = getattr(agent, "tool_registry", None)
+        strands_agent = getattr(agent, "strands_agent", None)
+        tools = list(
+            getattr(strands_agent, "tools", None) or getattr(agent, "_tool_list", [])
+        )
+        if not tools:
+            return agent
+        filtered = []
+        for tool in tools:
+            name = (
+                getattr(tool, "tool_name", "")
+                or getattr(tool, "__name__", "")
+                or getattr(tool, "name", "")
+            )
+            meta = getattr(tool, "_geoagent_meta", None)
+            if meta is None and registry is not None and name:
+                try:
+                    meta = registry.get(name)
+                except Exception:
+                    meta = None
+            if _permission_allows_tool(permission_profile, name, meta):
+                filtered.append(tool)
+        if len(filtered) != len(tools) and hasattr(agent, "_tool_list"):
+            agent._tool_list = filtered
+            if hasattr(agent, "_rebuild_strands_agent"):
+                agent._rebuild_strands_agent()
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            f"Failed to apply permission profile to GeoAgent: {exc}",
+            "OpenGeoAgent",
+            Qgis.MessageLevel.Warning,
+        )
+    return agent
+
+
+def _project_history_key(iface):
+    """Return a stable QSettings key suffix for the current QGIS project."""
+    path = ""
+    try:
+        from qgis.core import QgsProject
+
+        path = QgsProject.instance().fileName() or ""
+    except Exception:
+        path = ""
+    if not path:
+        try:
+            project = getattr(iface, "project", lambda: None)()
+            path = project.fileName() if project is not None else ""
+        except Exception:
+            path = ""
+    if not path:
+        return ""
+    raw = path
+    digest = hashlib.sha1(  # noqa: S324  - non-security identifier hash
+        raw.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
+    return f"{SETTINGS_PREFIX}history/{digest}"
+
+
+def _parse_markdown_transcript(text):
+    """Parse exported Markdown transcript blocks back into chat messages."""
+    messages = []
+    sender = None
+    body_lines = []
+    for line in str(text or "").splitlines():
+        if line.startswith("## "):
+            if sender is not None:
+                body = "\n".join(body_lines).strip()
+                if body:
+                    messages.append(
+                        {"sender": sender, "body": body, "markdown": sender != "You"}
+                    )
+            sender = line[3:].strip() or "OpenGeoAgent"
+            body_lines = []
+        else:
+            body_lines.append(line)
+    if sender is not None:
+        body = "\n".join(body_lines).strip()
+        if body:
+            messages.append(
+                {"sender": sender, "body": body, "markdown": sender != "You"}
+            )
+    return messages
+
+
+def _job_status_text(job):
+    """Return compact text for one recorded job."""
+    tools = job.get("tools") or ""
+    error = job.get("error") or ""
+    parts = [job.get("status", "")]
+    if tools:
+        parts.append(f"tools: {tools}")
+    if error:
+        parts.append(f"error: {error[:120]}")
+    return "; ".join(part for part in parts if part)
+
+
+def _default_model_for_provider(provider):
+    """Return the UI default model id for a provider."""
+    return DEFAULT_MODELS.get(provider, "")
+
+
+def _setting(settings, key, default="", value_type=str):
+    """Read a plugin setting value."""
+    return settings.value(f"{SETTINGS_PREFIX}{key}", default, type=value_type)
+
+
+def _max_tokens_from_settings(settings):
+    """Read the optional max-token setting; blank/auto means provider default."""
+    value = settings.value(f"{SETTINGS_PREFIX}max_tokens", "", type=str)
+    text = str(value or "").strip()
+    if not text or text.lower() in {"auto", "none", "null"}:
+        return None
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _max_tokens_to_setting(value):
+    """Return the QSettings value for an optional max-token selection.
+
+    Positive values below the historical 256-token minimum are clamped up to
+    256 so that the new Auto sentinel (0) does not silently allow tiny limits
+    that the spinbox previously disallowed.
+    """
+    if value is None:
+        return ""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if parsed <= 0:
+        return ""
+    return max(parsed, 256)
+
+
+def _max_tokens_to_display(value):
+    """Return a diagnostics-friendly display value for optional max tokens."""
+    return value if value is not None else "Auto"
+
+
+def _apply_environment_from_settings(settings):
+    """Apply provider credentials from QSettings to the current QGIS process."""
+    # Mapping of QSettings key names to environment variable names. The strings
+    # are identifiers, not credentials; the actual values are read from QSettings
+    # at runtime. ``# pragma: allowlist secret`` silences detect-secrets keyword
+    # heuristics on lines that contain "api_key" / "API_KEY".
+    env_map = {
+        "openai_api_key": "OPENAI_API_KEY",  # pragma: allowlist secret
+        "openai_org_id": "OPENAI_ORG_ID",
+        "openai_project_id": "OPENAI_PROJECT_ID",
+        "image_model": "GEOAGENT_IMAGE_MODEL",
+        "anthropic_api_key": "ANTHROPIC_API_KEY",  # pragma: allowlist secret
+        "gemini_api_key": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "aws_region": "AWS_REGION",
+        "ollama_host": "OLLAMA_HOST",
+        "litellm_api_key": "LITELLM_API_KEY",  # pragma: allowlist secret
+        "litellm_base_url": "LITELLM_BASE_URL",
+        "openrouter_api_key": "OPENROUTER_API_KEY",  # pragma: allowlist secret
+        "openrouter_base_url": "OPENROUTER_BASE_URL",
+        "vllm_api_key": "VLLM_API_KEY",  # pragma: allowlist secret
+        "vllm_base_url": "VLLM_BASE_URL",
+    }
+    for key, env_names in env_map.items():
+        value = _setting(settings, key, "").strip()
+        if value:
+            if isinstance(env_names, str):
+                env_names = (env_names,)
+            for env_name in env_names:
+                os.environ[env_name] = value
+
+
+def _unwrap_chat_worker_exception(exc):
+    """Return the most useful nested exception for UI reporting."""
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        nested = getattr(current, "original_exception", None)
+        if nested is None:
+            nested = getattr(current, "__cause__", None)
+        if nested is None:
+            break
+        current = nested
+    return current or exc
+
+
+def _format_chat_worker_error(exc, provider="", agent_mode=""):
+    """Return an actionable UI error for chat worker exceptions."""
+    display_exc = _unwrap_chat_worker_exception(exc)
+    raw = str(display_exc) or display_exc.__class__.__name__
+    lower = raw.lower()
+    cls_name = display_exc.__class__.__name__.lower()
+    provider_label = provider or "the selected provider"
+    mode_label = agent_mode or "this mode"
+    is_opera_mode = "opera" in agent_mode.lower()
+
+    try:
+        from geoagent.core.agent import _looks_like_max_tokens_reached
+    except Exception:
+        _looks_like_max_tokens_reached = None
+
+    if _looks_like_max_tokens_reached is not None and _looks_like_max_tokens_reached(
+        display_exc
+    ):
+        advice = (
+            "The model hit its output-token limit before OpenGeoAgent could "
+            f"finish the {mode_label} tool workflow. This is a model budget "
+            "stop, not a QGIS or Earth Engine load failure."
+        )
+        if provider == "gemini":
+            advice += (
+                "\n\nFor Gemini, increase Settings > Model > Max tokens to "
+                "16384 or 32768 if this persists. Gemini thinking/tool-call "
+                "turns can consume more output tokens than the final visible "
+                "answer."
+            )
+        else:
+            advice += (
+                f"\n\nIncrease Settings > Model > Max tokens for "
+                f"{provider_label}, or retry with a narrower request."
+            )
+        return f"{advice}\n\nOriginal error: {raw}"
+
+    if "readerror" in cls_name or "remoteprotocolerror" in cls_name:
+        return (
+            "The model provider streaming connection was interrupted while "
+            f"OpenGeoAgent was running {mode_label}. OpenGeoAgent tools were "
+            "not the source of this error.\n\nDisable streaming in OpenGeoAgent "
+            "settings or retry the request. If this repeats, use a shorter "
+            f"request or check network access for {provider_label}.\n\n"
+            f"Original error: {raw}"
+        )
+
+    if (
+        "tlsv1_alert_decode_error" in lower
+        or "api connection error" in lower
+        or "connection error" in lower
+        or "connecterror" in lower
+        or "connecterror" in cls_name
+        or "connectionerror" in cls_name
+        or "ssl" in cls_name
+    ):
+        tool_attribution = (
+            "The NASA OPERA tools were not the source of this TLS error; "
+            if is_opera_mode
+            else "OpenGeoAgent tools were not the source of this error; "
+        )
+        advice = (
+            "The model provider connection failed while OpenGeoAgent was "
+            f"running {mode_label}. {tool_attribution}"
+            "the failing request was the model call."
+        )
+        if provider == "openai-codex":
+            advice += (
+                "\n\nYou are using openai-codex, which talks to the ChatGPT/Codex "
+                "backend. For longer OPERA tool workflows, switch Settings > "
+                "Model to provider=openai with an OPENAI_API_KEY, or try again "
+                "with streaming disabled. For OPERA searches that do not need "
+                "natural language, use the direct "
+                "submit_nasa_opera_search_task(...) helper."
+            )
+        else:
+            advice += (
+                f"\n\nCheck network/proxy/TLS access for {provider_label}, then "
+                "try again. If streaming is enabled, try disabling it once to "
+                "reduce the number of provider requests."
+            )
+        return f"{advice}\n\nOriginal error: {raw}"
+
+    return raw
+
+
+def _transcription_model_from_settings(settings):
+    """Return the configured OpenAI speech-to-text model."""
+    saved = _setting(settings, "transcription_model", "", str).strip()
+    if saved:
+        return saved
+    env_model = os.environ.get("OPENAI_TRANSCRIPTION_MODEL", "").strip()
+    return env_model or DEFAULT_TRANSCRIPTION_MODEL
+
+
+def _image_model_from_settings(settings):
+    """Return the configured OpenAI image-generation model."""
+    saved = _setting(settings, "image_model", "", str).strip()
+    if saved:
+        return saved
+    env_model = os.environ.get("GEOAGENT_IMAGE_MODEL", "").strip()
+    return env_model or DEFAULT_IMAGE_MODEL
+
+
+def _qt_value(enum_name, member_name):
+    """Return a Qt enum member across PyQt enum API variants."""
+    container = getattr(Qt, enum_name, Qt)
+    return getattr(container, member_name)
+
+
+def _enum_value(cls, enum_name, member_name):
+    """Return an enum member from either scoped or legacy Qt APIs."""
+    container = getattr(cls, enum_name, cls)
+    return getattr(container, member_name)
+
+
+def _portable_key_sequence(sequence):
+    """Return a normalized portable string for a key sequence."""
+    sequence_format = getattr(QKeySequence, "SequenceFormat", QKeySequence)
+    portable = getattr(sequence_format, "PortableText", None)
+    text = sequence.toString(portable) if portable is not None else sequence.toString()
+    return str(text or "").strip().lower()
+
+
+def _key_event_sequence_value(event):
+    """Return a QKeySequence-compatible integer for a key event."""
+    key = int(event.key())
+    modifiers = event.modifiers()
+    mod_value = getattr(modifiers, "value", modifiers)
+    try:
+        mod_value = int(mod_value)
+    except TypeError:
+        mod_value = int(modifiers)
+    return mod_value | key
+
+
+def _event_matches_key_sequence(event, shortcut_text):
+    """Return True when a key event matches a configured shortcut."""
+    if not shortcut_text:
+        return False
+    key_press = _enum_value(QEvent, "Type", "KeyPress")
+    is_auto_repeat = getattr(event, "isAutoRepeat", lambda: False)
+    if event.type() != key_press or is_auto_repeat():
+        return False
+    configured = _portable_key_sequence(QKeySequence(shortcut_text))
+    if not configured:
+        return False
+    event_sequence = _portable_key_sequence(
+        QKeySequence(_key_event_sequence_value(event))
+    )
+    return event_sequence == configured
+
+
+def _exec_dialog(dialog):
+    """Execute a dialog across PyQt API variants."""
+    exec_fn = getattr(dialog, "exec", None) or getattr(dialog, "exec_", None)
+    return exec_fn()
+
+
+def _exec_menu(menu, pos):
+    """Execute a menu across PyQt API variants."""
+    exec_fn = getattr(menu, "exec", None) or getattr(menu, "exec_", None)
+    return exec_fn(pos)
+
+
+def _plain_text_to_html(text):
+    """Convert plain text to basic HTML."""
+    return html.escape(text).replace("\n", "<br>")
+
+
+def _markdown_image_target_to_html_src(target):
+    """Return a safe HTML image source for a Markdown image target."""
+    target = str(target or "").strip()
+    if not target:
+        return ""
+    lower = target.lower()
+    if lower.startswith(("http://", "https://", "data:image/", "file://")):
+        return target
+    if re.match(r"^[a-z][a-z0-9+.-]*:", lower):
+        return ""
+    try:
+        path = Path(target).expanduser()
+        if path.exists():
+            return path.resolve().as_uri()
+    except Exception as exc:
+        QgsMessageLog.logMessage(
+            f"Could not resolve image target {target!r}: {exc}",
+            "OpenGeoAgent",
+            Qgis.MessageLevel.Info,
+        )
+    return target
+
+
+def _image_html(src, alt="image", width=None, height=None):
+    """Return a constrained HTML image tag."""
+    src = _markdown_image_target_to_html_src(src)
+    if not src:
+        return ""
+    attrs = [f"src='{html.escape(src, quote=True)}'"]
+    attrs.append(f"alt='{html.escape(str(alt or 'image'), quote=True)}'")
+    if width and height:
+        attrs.append(f"width='{int(width)}'")
+        attrs.append(f"height='{int(height)}'")
+    elif width:
+        attrs.append(f"width='{int(width)}'")
+    elif height:
+        attrs.append(f"height='{int(height)}'")
+    attrs.append(
+        "style='max-width: 100%; border: 1px solid #d0d7de; border-radius: 4px;'"
+    )
+    return f"<img {' '.join(attrs)}>"
+
+
+def _inline_markdown_to_html(text):
+    """Convert inline Markdown spans to HTML."""
+    text = html.escape(text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
+    return text
+
+
+def _markdown_to_basic_html(markdown):
+    """Small fallback renderer for common Markdown when Qt lacks setMarkdown."""
+    lines = markdown.splitlines()
+    html_lines = []
+    in_ul = False
+    in_ol = False
+    in_code = False
+    code_lines = []
+
+    def close_lists():
+        """Close any open HTML list elements."""
+        nonlocal in_ul, in_ol
+        if in_ul:
+            html_lines.append("</ul>")
+            in_ul = False
+        if in_ol:
+            html_lines.append("</ol>")
+            in_ol = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if in_code:
+                html_lines.append(
+                    f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>"
+                )
+                code_lines = []
+                in_code = False
+            else:
+                close_lists()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+
+        if not stripped:
+            close_lists()
+            html_lines.append("")
+            continue
+
+        image = re.match(r"^!\[([^\]]*)\]\((?:<([^>]+)>|([^)]+))\)$", stripped)
+        if image:
+            close_lists()
+            alt = image.group(1) or "image"
+            target = image.group(2) or image.group(3) or ""
+            img = _image_html(target, alt=alt)
+            if img:
+                html_lines.append(f"<p>{img}</p>")
+            continue
+
+        heading = re.match(r"^(#{1,3})\s+(.+)$", stripped)
+        if heading:
+            close_lists()
+            level = len(heading.group(1))
+            html_lines.append(
+                f"<h{level}>{_inline_markdown_to_html(heading.group(2))}</h{level}>"
+            )
+            continue
+
+        bullet = re.match(r"^[-*]\s+(.+)$", stripped)
+        if bullet:
+            if in_ol:
+                html_lines.append("</ol>")
+                in_ol = False
+            if not in_ul:
+                html_lines.append("<ul>")
+                in_ul = True
+            html_lines.append(f"<li>{_inline_markdown_to_html(bullet.group(1))}</li>")
+            continue
+
+        numbered = re.match(r"^\d+\.\s+(.+)$", stripped)
+        if numbered:
+            if in_ul:
+                html_lines.append("</ul>")
+                in_ul = False
+            if not in_ol:
+                html_lines.append("<ol>")
+                in_ol = True
+            html_lines.append(f"<li>{_inline_markdown_to_html(numbered.group(1))}</li>")
+            continue
+
+        close_lists()
+        html_lines.append(f"<p>{_inline_markdown_to_html(stripped)}</p>")
+
+    if in_code:
+        html_lines.append(
+            f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>"
+        )
+    close_lists()
+    return "\n".join(html_lines)
+
+
+def _format_tool_value(value, max_length=220):
+    """Format a tool argument value for compact display."""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, sort_keys=True)
+        except TypeError:
+            text = str(value)
+    text = text.replace("\n", " ").strip()
+    if len(text) > max_length:
+        return text[: max_length - 3] + "..."
+    return text
+
+
+def _tool_call_label_and_args(name, args):
+    """Return a display label plus args for a recorded tool call."""
+    display_args = dict(args)
+    routed_tool = str(display_args.pop("tool_name", "") or "").strip()
+    if name == "run_whitebox_tool" and routed_tool:
+        parameters = display_args.pop("parameters", None)
+        if isinstance(parameters, dict):
+            display_args.update(parameters)
+        return f"{name} -> {routed_tool}", display_args
+    if name == "get_whitebox_tool_info" and routed_tool:
+        return f"{name} -> {routed_tool}", display_args
+    return name, display_args
+
+
+def _clean_tool_display_args(args):
+    """Drop no-op optional values that make repeated calls look different."""
+    cleaned = {}
+    default_values = {
+        "add_outputs_to_qgis": True,
+        "category": "",
+        "fill_pits": False,
+        "fix_flats": False,
+        "flat_increment": 0,
+        "layer_name": "",
+        "max_depth": 0,
+        "max_length": 0,
+        "max_procs": None,
+        "output_path": "",
+        "verbose": False,
+    }
+    for key, value in args.items():
+        if key in default_values and value == default_values[key]:
+            continue
+        if value is None or value == "":
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+_SENSITIVE_QUERY_PARAMS = {
+    "sig",
+    "signature",
+    "sv",
+    "se",
+    "st",
+    "sp",
+    "sas",
+    "token",
+    "access_token",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "x-goog-signature",
+    "x-goog-credential",
+    "key",
+    "api_key",
+    "apikey",
+}
+
+
+def _redact_url_for_display(url):
+    """Redact bearer-like query parameters (e.g., SAS tokens) from a URL.
+
+    Signed Planetary Computer or cloud storage URLs embed credentials in the
+    query string. Persisting them in chat transcripts increases the leakage
+    risk when users copy or share logs.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except (ValueError, TypeError):
+        return url
+    if not parts.query:
+        return url
+    redacted_pairs = []
+    changed = False
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() in _SENSITIVE_QUERY_PARAMS and value:
+            redacted_pairs.append((key, "REDACTED"))
+            changed = True
+        else:
+            redacted_pairs.append((key, value))
+    if not changed:
+        return url
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(redacted_pairs, doseq=True),
+            parts.fragment,
+        )
+    )
+
+
+def _format_tool_calls(tool_calls):
+    """Return Markdown lines describing tool input parameters."""
+    if not tool_calls:
+        return ""
+    lines = ["Tool inputs:"]
+    grouped = []
+    index_by_signature = {}
+    stac_asset_urls = []
+    seen_stac_urls = set()
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        name = str(call.get("name") or "").strip()
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        if not name:
+            continue
+        label, args = _tool_call_label_and_args(name, args)
+        args = _clean_tool_display_args(args)
+        try:
+            args_key = json.dumps(args, sort_keys=True, default=str)
+        except TypeError:
+            args_key = str(sorted(args.items()))
+        signature = (label, args_key)
+        if signature in index_by_signature:
+            grouped[index_by_signature[signature]][2] += 1
+        else:
+            index_by_signature[signature] = len(grouped)
+            grouped.append([label, args, 1])
+
+        result = call.get("result") if isinstance(call.get("result"), dict) else {}
+        if name == "add_stac_asset_to_qgis":
+            href = str(result.get("asset_href") or "").strip()
+            if href and href not in seen_stac_urls:
+                seen_stac_urls.add(href)
+                stac_asset_urls.append(
+                    (str(result.get("layer_name") or "STAC asset"), href)
+                )
+
+    for label, args, count in grouped:
+        suffix = f" (repeated {count} times)" if count > 1 else ""
+        if args:
+            params = ", ".join(
+                f"`{key}={_format_tool_value(value)}`"
+                for key, value in sorted(args.items())
+            )
+            lines.append(f"- **`{label}`**{suffix}: {params}")
+        else:
+            lines.append(f"- **`{label}`**{suffix}")
+    if stac_asset_urls:
+        lines.append("")
+        lines.append("STAC asset URLs:")
+        lines.append(
+            "_Signed query parameters are redacted to avoid leaking "
+            "credentials when transcripts are shared._"
+        )
+        for layer_name, href in stac_asset_urls:
+            lines.append(f"- **{layer_name}:**")
+            lines.append("```text")
+            lines.append(_redact_url_for_display(href))
+            lines.append("```")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+SCRIPT_SPECS = {
+    "run_pyqgis_script": {
+        "arg_keys": ("code",),
+        "result_keys": ("pyqgis_script",),
+        "kind": "PyQGIS",
+    },
+    "run_gee_python_snippet": {
+        "arg_keys": ("code",),
+        "result_keys": ("earth_engine_python_snippet",),
+        "kind": "Earth Engine",
+    },
+}
+RESULT_SCRIPT_KEYS = {
+    "pyqgis_script": "PyQGIS",
+    "earth_engine_python_snippet": "Earth Engine",
+}
+
+
+def _python_literal(value):
+    """Return a compact Python literal for copied snippets."""
+    try:
+        return repr(value)
+    except Exception:
+        return repr(str(value))
+
+
+def _coerce_optional_float(value):
+    """Return a float for non-empty numeric values, otherwise None."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _gee_load_dataset_snippet_from_args(args):
+    """Build a simple Earth Engine snippet from load_gee_dataset arguments."""
+    if not isinstance(args, dict):
+        return ""
+    asset_id = str(args.get("asset_id") or "").strip()
+    if not asset_id:
+        return ""
+    asset_type = str(args.get("asset_type") or "Image").strip() or "Image"
+    layer_name = str(args.get("layer_name") or asset_id.split("/")[-1]).strip()
+    method = str(args.get("method") or args.get("reducer") or "mosaic").strip()
+    bands = args.get("bands")
+    vis_params = {}
+    if bands not in (None, ""):
+        vis_params["bands"] = bands
+    min_value = _coerce_optional_float(args.get("min_value"))
+    max_value = _coerce_optional_float(args.get("max_value"))
+    palette = args.get("palette")
+    if min_value is not None:
+        vis_params["min"] = min_value
+    if max_value is not None:
+        vis_params["max"] = max_value
+    if palette not in (None, ""):
+        vis_params["palette"] = palette
+
+    lines = [
+        "import ee",
+        "import geemap",
+        "",
+        "m = geemap.Map()",
+        f"asset_id = {_python_literal(asset_id)}",
+    ]
+    if asset_type == "ImageCollection":
+        lines.append("collection = ee.ImageCollection(asset_id)")
+        start_date = args.get("start_date")
+        end_date = args.get("end_date")
+        if start_date and end_date:
+            lines.append(
+                "collection = collection.filterDate("
+                f"{_python_literal(start_date)}, {_python_literal(end_date)})"
+            )
+        bbox = args.get("bbox")
+        if bbox:
+            lines.append(f"bbox = {_python_literal(bbox)}")
+            lines.append(
+                "collection = collection.filterBounds(ee.Geometry.Rectangle(bbox))"
+            )
+        if method == "mosaic":
+            lines.append("image = collection.mosaic()")
+        elif method == "mode":
+            lines.append("image = collection.reduce(ee.Reducer.mode())")
+        else:
+            lines.append(f"image = collection.{method}()")
+    elif asset_type == "FeatureCollection":
+        lines.append("image = ee.FeatureCollection(asset_id)")
+    else:
+        lines.append("image = ee.Image(asset_id)")
+    lines.extend(
+        [
+            f"vis_params = {_python_literal(vis_params)}",
+            f"m.add_layer(image, vis_params, {_python_literal(layer_name)})",
+            "m",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _stac_load_asset_snippet(args, result=None):
+    """Build a PyQGIS snippet for loading a STAC raster asset."""
+    args = args if isinstance(args, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    qgis_uri = str(result.get("qgis_uri") or args.get("qgis_uri") or "").strip()
+    asset_href = str(result.get("asset_href") or args.get("asset_href") or "").strip()
+    if not qgis_uri and not asset_href:
+        return ""
+    sign_asset = args.get("sign_asset", True)
+    sign_asset = (
+        False if str(sign_asset).strip().lower() == "false" else bool(sign_asset)
+    )
+    layer_name = str(
+        result.get("layer_name") or args.get("layer_name") or "STAC raster"
+    ).strip()
+    lines = [
+        "from qgis.core import QgsProject, QgsRasterLayer",
+        "",
+        f"asset_href = {_python_literal(asset_href)}",
+        f"uri = {_python_literal(qgis_uri)}",
+        f"sign_asset = {_python_literal(sign_asset)}",
+        "if not uri:",
+        "    href = asset_href",
+        "    if sign_asset:",
+        "        try:",
+        "            import planetary_computer",
+        "            href = planetary_computer.sign(href)",
+        "        except Exception:",
+        "            pass",
+        "    uri = href",
+        "if uri.lower().startswith(('http://', 'https://')):",
+        "    uri = f'/vsicurl/{uri}'",
+        f"layer_name = {_python_literal(layer_name)}",
+        "layer = QgsRasterLayer(uri, layer_name)",
+        "if not layer.isValid():",
+        "    raise RuntimeError(f'Could not load raster: {uri}')",
+        "QgsProject.instance().addMapLayer(layer)",
+        "iface.setActiveLayer(layer)",
+        "canvas = iface.mapCanvas()",
+        "extent = layer.extent()",
+        "try:",
+        "    from geoagent.tools.qgis import _transform_extent_to_canvas_crs",
+        "    extent = _transform_extent_to_canvas_crs(layer, canvas, extent)",
+        "except Exception:",
+        "    pass",
+        "canvas.setExtent(extent)",
+        "canvas.refresh()",
+    ]
+    return "\n".join(lines)
+
+
+def _timelapse_create_snippet_from_args(args):
+    """Build a QGIS Python Console snippet for a Timelapse generation call."""
+    if not isinstance(args, dict):
+        return ""
+    cleaned = {
+        str(key): value for key, value in args.items() if value not in (None, "")
+    }
+    if not cleaned:
+        return ""
+    arg_lines = []
+    for key, value in sorted(cleaned.items()):
+        arg_lines.append(f"    {key}={_python_literal(value)},")
+    args_block = "\n".join(arg_lines)
+    return f"""from qgis.core import QgsProject
+from qgis.utils import iface
+
+from geoagent.tools.timelapse import timelapse_tools
+
+project = QgsProject.instance()
+tools = {{
+    getattr(tool, "tool_name", getattr(tool, "__name__", "")): tool
+    for tool in timelapse_tools(iface, project)
+}}
+create_timelapse = tools["create_timelapse"]
+create_timelapse_fn = getattr(create_timelapse, "__wrapped__", create_timelapse)
+
+result = create_timelapse_fn(
+{args_block}
+)
+print(result)
+"""
+
+
+def _script_from_tool_args(tool_name, args):
+    """Return a copyable script derived from tool arguments alone."""
+    if tool_name == "load_gee_dataset":
+        return {
+            "kind": "Earth Engine",
+            "tool_name": tool_name,
+            "code": _gee_load_dataset_snippet_from_args(args),
+        }
+    if tool_name == "add_stac_asset_to_qgis":
+        return {
+            "kind": "PyQGIS",
+            "tool_name": tool_name,
+            "code": _stac_load_asset_snippet(args),
+        }
+    if tool_name == "create_timelapse":
+        return {
+            "kind": "Python",
+            "tool_name": tool_name,
+            "code": _timelapse_create_snippet_from_args(args),
+        }
+    return {}
+
+
+def _first_script_value(mapping, keys):
+    """Return the first non-empty script-like value for keys in mapping."""
+    if not isinstance(mapping, dict):
+        return ""
+    for key in keys:
+        value = str(mapping.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _latest_executable_snippet(tool_calls):
+    """Return the latest copyable code snippet found in recorded tool calls."""
+    for call in reversed(tool_calls or []):
+        if not isinstance(call, dict):
+            continue
+        name = str(call.get("name") or "").strip()
+        spec = SCRIPT_SPECS.get(name)
+        if spec is not None:
+            code = _first_script_value(call.get("args"), spec["arg_keys"])
+            if not code:
+                code = _first_script_value(call.get("result"), spec["result_keys"])
+            if code:
+                return {
+                    "kind": spec["kind"],
+                    "tool_name": name,
+                    "code": code,
+                }
+        result = call.get("result")
+        if name == "add_stac_asset_to_qgis":
+            code = _stac_load_asset_snippet(call.get("args"), result)
+            if code:
+                return {
+                    "kind": "PyQGIS",
+                    "tool_name": name,
+                    "code": code,
+                }
+        if isinstance(result, dict):
+            for key, kind in RESULT_SCRIPT_KEYS.items():
+                code = str(result.get(key) or "").strip()
+                if code:
+                    return {
+                        "kind": kind,
+                        "tool_name": name,
+                        "code": code,
+                    }
+        snippet = _script_from_tool_args(name, call.get("args"))
+        if snippet.get("code"):
+            return snippet
+    return {}
+
+
+def _latest_pyqgis_script(tool_calls):
+    """Return the last PyQGIS script found in recorded tool calls."""
+    snippet = _latest_executable_snippet(
+        [
+            call
+            for call in tool_calls or []
+            if isinstance(call, dict)
+            and str(call.get("name") or "").strip() == "run_pyqgis_script"
+        ]
+    )
+    return str(snippet.get("code") or "")
+
+
+def _console_ready_pyqgis_script(code):
+    """Return PyQGIS code that can run in the QGIS Python Console."""
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    preamble = """# OpenGeoAgent PyQGIS script.
+# This preamble makes scripts copied from GeoAgent runnable in the QGIS Python Console.
+try:
+    iface
+except NameError:
+    from qgis.utils import iface
+
+try:
+    project
+except NameError:
+    from qgis.core import QgsProject
+    project = QgsProject.instance()
+
+try:
+    canvas
+except NameError:
+    canvas = iface.mapCanvas()
+
+try:
+    active_layer
+except NameError:
+    active_layer = iface.activeLayer()
+"""
+    return f"{preamble}\n{code}\n"
+
+
+def _copy_ready_snippet(snippet):
+    """Return clipboard-ready code for a discovered executable snippet."""
+    code = str(snippet.get("code") or "").strip()
+    if not code:
+        return ""
+    if snippet.get("kind") == "PyQGIS":
+        return _console_ready_pyqgis_script(code)
+    return f"# OpenGeoAgent {snippet.get('kind', 'Python')} snippet.\n{code}\n"
+
+
+def _conversation_markdown(messages):
+    """Return the full chat transcript as Markdown."""
+    blocks = []
+    for msg in messages:
+        sender = str(msg.get("sender") or "").strip()
+        body = str(msg.get("display_body") or msg.get("body") or "").strip()
+        image_body = _message_images_markdown(msg.get("images"))
+        if image_body:
+            body = f"{body}\n\n{image_body}".strip()
+        if not sender or not body:
+            continue
+        blocks.append(f"## {sender}\n\n{body}")
+    return "\n\n".join(blocks)
+
+
+def _scaled_image_for_attachment(image):
+    """Return an image copy small enough for model upload."""
+    if image.width() <= MAX_IMAGE_EDGE and image.height() <= MAX_IMAGE_EDGE:
+        return image
+    keep_aspect = _qt_value("AspectRatioMode", "KeepAspectRatio")
+    smooth = _qt_value("TransformationMode", "SmoothTransformation")
+    return image.scaled(MAX_IMAGE_EDGE, MAX_IMAGE_EDGE, keep_aspect, smooth)
+
+
+def _image_to_png_bytes(image):
+    """Serialize a Qt image-like object to PNG bytes."""
+    if hasattr(image, "toImage"):
+        image = image.toImage()
+    if image is None or not hasattr(image, "isNull") or image.isNull():
+        raise ValueError("Clipboard image is empty or unsupported.")
+
+    image = _scaled_image_for_attachment(image)
+    data = QByteArray()
+    buffer = QBuffer(data)
+    write_only = _enum_value(QIODevice, "OpenModeFlag", "WriteOnly")
+    if not buffer.open(write_only):
+        raise ValueError("Could not prepare clipboard image for upload.")
+    try:
+        if not image.save(buffer, "PNG"):
+            raise ValueError("Could not encode clipboard image as PNG.")
+    finally:
+        buffer.close()
+    return bytes(data.data()), image.width(), image.height()
+
+
+def _output_image_dir():
+    """Return the directory used for model-generated image artifacts."""
+    path = Path(tempfile.gettempdir()) / "open_geoagent_outputs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _allowed_output_image_roots():
+    """Return resolved directories where extracted output paths may live."""
+    roots: list[Path] = []
+    candidates = [
+        Path(tempfile.gettempdir()) / "open_geoagent_outputs",
+        Path(tempfile.gettempdir()) / "geoagent_images",
+        Path(tempfile.gettempdir()) / "open_geoagent_timelapse",
+    ]
+    env_dir = os.environ.get("GEOAGENT_IMAGE_OUTPUT_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    for candidate in candidates:
+        try:
+            roots.append(candidate.resolve())
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"Could not resolve output image root {candidate}: {exc}",
+                "OpenGeoAgent",
+                Qgis.MessageLevel.Info,
+            )
+    return roots
+
+
+def _path_under_allowed_output_root(path):
+    """Return True when the given path resolves under an allowlisted root."""
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return False
+    for root in _allowed_output_image_roots():
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _output_image_extension(image):
+    """Return a safe file extension for a model-generated image."""
+    format_name = str(image.get("format") or "").lower().lstrip(".")
+    mime_type = str(image.get("mime_type") or "").lower()
+    if format_name in {"png", "jpg", "jpeg", "webp", "gif"}:
+        return "jpg" if format_name == "jpeg" else format_name
+    if mime_type == "image/jpeg":
+        return "jpg"
+    if mime_type.startswith("image/"):
+        candidate = mime_type.split("/", 1)[1].split("+", 1)[0]
+        if candidate in {"png", "jpg", "jpeg", "webp", "gif"}:
+            return "jpg" if candidate == "jpeg" else candidate
+    return "png"
+
+
+def _decode_output_image_bytes(value):
+    """Decode model image bytes that may arrive as bytes or base64 text."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        text = value.strip()
+        data_uri = re.match(r"^data:image/[a-zA-Z0-9.+-]+;base64,(.+)$", text, re.S)
+        if data_uri:
+            text = data_uri.group(1)
+        try:
+            return base64.b64decode(re.sub(r"\s+", "", text), validate=True)
+        except Exception:
+            return b""
+    return b""
+
+
+def _display_size_for_image(width, height, max_edge=MAX_OUTPUT_IMAGE_DISPLAY_EDGE):
+    """Return a constrained display size preserving aspect ratio."""
+    try:
+        width = int(width or 0)
+        height = int(height or 0)
+    except (TypeError, ValueError):
+        return None, None
+    if width <= 0 or height <= 0:
+        return None, None
+    scale = min(1.0, float(max_edge) / float(max(width, height)))
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def _prepare_output_images(images):
+    """Persist model-generated image bytes and return transcript-safe metadata."""
+    prepared = []
+    for index, image in enumerate(images or []):
+        if not isinstance(image, dict):
+            continue
+        entry = {
+            key: image.get(key)
+            for key in ("format", "mime_type", "width", "height", "url", "path")
+            if image.get(key) not in (None, "")
+        }
+        image_bytes = _decode_output_image_bytes(image.get("bytes"))
+        if image_bytes:
+            digest = hashlib.sha1(  # noqa: S324 - non-security artifact name
+                image_bytes, usedforsecurity=False
+            ).hexdigest()[:16]
+            ext = _output_image_extension(image)
+            path = _output_image_dir() / f"opengeoagent-image-{digest}.{ext}"
+            if not path.exists():
+                with open(path, "wb") as f:
+                    f.write(image_bytes)
+            entry["path"] = str(path)
+
+            if QGuiApplication.instance() is not None:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(image_bytes):
+                    entry["width"] = pixmap.width()
+                    entry["height"] = pixmap.height()
+        elif not entry.get("url") and not entry.get("path"):
+            continue
+        entry.setdefault("alt", f"OpenGeoAgent image {index + 1}")
+        prepared.append(entry)
+    return prepared
+
+
+def _dedupe_output_images(images):
+    """Return image metadata with duplicate path/url entries removed."""
+    deduped = []
+    seen = set()
+    for image in images or []:
+        if not isinstance(image, dict):
+            continue
+        key = image.get("path") or image.get("url")
+        if not key:
+            key = tuple(sorted((str(k), str(v)) for k, v in image.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(image)
+    return deduped
+
+
+def _images_from_output_text(text):
+    """Extract local image paths mentioned in model/tool output text."""
+    images = []
+    for match in OUTPUT_IMAGE_PATH_RE.finditer(str(text or "")):
+        path = match.group("path").rstrip(".,);]")
+        if not _path_under_allowed_output_root(path):
+            continue
+        ext = path.rsplit(".", 1)[-1].lower()
+        if ext == "jpeg":
+            ext = "jpg"
+        images.append(
+            {
+                "path": path,
+                "format": ext,
+                "mime_type": "image/jpeg" if ext == "jpg" else f"image/{ext}",
+            }
+        )
+    return _dedupe_output_images(images)
+
+
+def _local_image_metadata_from_path(path):
+    """Return image metadata for an existing local image path."""
+    path = str(path or "").strip().rstrip(".,);]")
+    if not path:
+        return None
+    if not _path_under_allowed_output_root(path):
+        return None
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return None
+    if not resolved.is_file():
+        return None
+    ext = resolved.suffix.lower().lstrip(".")
+    if ext not in {"png", "jpg", "jpeg", "webp", "gif"}:
+        return None
+    if ext == "jpeg":
+        ext = "jpg"
+    return {
+        "path": str(resolved),
+        "format": ext,
+        "mime_type": "image/jpeg" if ext == "jpg" else f"image/{ext}",
+    }
+
+
+def _images_from_trusted_tool_output_text(text, tool_calls):
+    """Extract local image paths from text when a trusted image tool ran."""
+    trusted_tools = {"create_timelapse", "generate_image"}
+    ran_trusted_tool = any(
+        isinstance(call, dict) and str(call.get("name") or "") in trusted_tools
+        for call in tool_calls or []
+    )
+    if not ran_trusted_tool:
+        return []
+
+    images = []
+    for match in OUTPUT_IMAGE_PATH_RE.finditer(str(text or "")):
+        image = _local_image_metadata_from_path(match.group("path"))
+        if image is not None:
+            images.append(image)
+    return _dedupe_output_images(images)
+
+
+def _image_markdown_target(image):
+    """Return the Markdown target for one transcript image."""
+    target = str(image.get("url") or image.get("path") or "").strip()
+    if not target:
+        return ""
+    if " " in target or target.startswith("/"):
+        return f"<{target}>"
+    return target
+
+
+def _message_images_markdown(images):
+    """Return Markdown image references for a message image list."""
+    lines = []
+    for image in images or []:
+        if not isinstance(image, dict):
+            continue
+        target = _image_markdown_target(image)
+        if not target:
+            continue
+        alt = str(image.get("alt") or "OpenGeoAgent image").replace("]", "")
+        lines.append(f"![{alt}]({target})")
+    return "\n\n".join(lines)
+
+
+def _message_images_html(images):
+    """Return inline HTML for a message image list."""
+    parts = []
+    for image in images or []:
+        if not isinstance(image, dict):
+            continue
+        target = image.get("url") or image.get("path") or ""
+        width, height = _display_size_for_image(
+            image.get("width"),
+            image.get("height"),
+            max_edge=OUTPUT_IMAGE_THUMBNAIL_EDGE,
+        )
+        if width is None:
+            width = OUTPUT_IMAGE_THUMBNAIL_EDGE
+        img = _image_html(
+            target,
+            alt=image.get("alt") or "OpenGeoAgent image",
+            width=width,
+            height=height,
+        )
+        if not img:
+            continue
+        label = html.escape(str(image.get("path") or image.get("url") or "image"))
+        href = image.get("_href")
+        if href:
+            img = f"<a href='{html.escape(str(href), quote=True)}'>{img}</a>"
+        parts.append(f"<p>{img}<br><small>{label}</small></p>")
+    return "\n".join(parts)
+
+
+def _attachment_to_content_block(attachment):
+    """Convert one image attachment into a Strands content block."""
+    return {
+        "image": {
+            "format": attachment["format"],
+            "source": {"bytes": attachment["bytes"]},
+        }
+    }
+
+
+def _build_chat_content(prompt, attachments):
+    """Build a Strands-compatible text plus image payload."""
+    if not attachments:
+        return prompt
+    content = [{"text": prompt}]
+    content.extend(_attachment_to_content_block(item) for item in attachments)
+    return content
+
+
+def _normalized_crop_rect(rect, bounds):
+    """Normalize and clamp a crop rectangle to pixmap bounds."""
+    if rect is None or bounds is None:
+        return QRect()
+    rect = rect.normalized()
+    if hasattr(rect, "intersected"):
+        rect = rect.intersected(bounds)
+    if rect.isNull() or rect.width() <= 1 or rect.height() <= 1:
+        return QRect()
+    return rect
+
+
+def _crop_pixmap(pixmap, rect):
+    """Return a normalized rectangular crop from a pixmap."""
+    if pixmap is None or pixmap.isNull() or rect is None:
+        return QPixmap()
+    rect = _normalized_crop_rect(rect, pixmap.rect())
+    if rect.isNull():
+        return QPixmap()
+    return pixmap.copy(rect)
+
+
+def _screen_for_widget(widget):
+    """Return the screen containing a widget, falling back to cursor/primary."""
+    screen = None
+    if widget is not None:
+        try:
+            window_handle = widget.windowHandle()
+        except Exception:
+            window_handle = None
+        if window_handle is not None:
+            screen = window_handle.screen()
+        if screen is None and hasattr(widget, "screen"):
+            try:
+                screen = widget.screen()
+            except Exception:
+                screen = None
+    if screen is None and hasattr(QGuiApplication, "screenAt"):
+        screen = QGuiApplication.screenAt(QCursor.pos())
+    return screen or QGuiApplication.primaryScreen()
+
+
+def _grab_screen_rect(screen, rect):
+    """Grab a global desktop rectangle from a screen."""
+    if screen is None or rect is None:
+        return QPixmap()
+    screen_geometry = screen.geometry()
+    rect = _normalized_crop_rect(rect, screen_geometry)
+    if rect.isNull():
+        return QPixmap()
+    local = rect.translated(-screen_geometry.topLeft())
+    return screen.grabWindow(0, local.x(), local.y(), local.width(), local.height())
+
+
+def _global_widget_rect(widget):
+    """Return a widget's geometry in global screen coordinates."""
+    if widget is None:
+        return QRect()
+    return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+
+def _grab_widget_global_rect(widget, global_rect):
+    """Grab a global rectangle from a QWidget by mapping it into widget space."""
+    if widget is None or global_rect is None:
+        return QPixmap()
+    widget_rect = _global_widget_rect(widget)
+    rect = _normalized_crop_rect(global_rect, widget_rect)
+    if rect.isNull():
+        return QPixmap()
+    local_rect = QRect(widget.mapFromGlobal(rect.topLeft()), rect.size())
+    return widget.grab(local_rect)
+
+
+class PromptTextEdit(QPlainTextEdit):
+    """Prompt editor with chat-friendly keyboard shortcuts."""
+
+    send_requested = pyqtSignal()
+    previous_requested = pyqtSignal()
+    next_requested = pyqtSignal()
+    image_pasted = pyqtSignal(object)
+    voice_toggle_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._voice_shortcut_text = ""
+
+    def set_voice_shortcut_text(self, shortcut_text):
+        """Set the key sequence that toggles voice recording."""
+        self._voice_shortcut_text = str(shortcut_text or "").strip()
+
+    def insertFromMimeData(self, source):
+        """Handle pasted clipboard images before falling back to text paste."""
+        if source.hasImage():
+            self.image_pasted.emit(source.imageData())
+            if source.hasText():
+                super().insertFromMimeData(source)
+            return
+        super().insertFromMimeData(source)
+
+    def keyPressEvent(self, event):
+        """Handle send and prompt-history keyboard shortcuts."""
+        key = event.key()
+        modifiers = event.modifiers()
+        control = _qt_value("KeyboardModifier", "ControlModifier")
+        key_return = _qt_value("Key", "Key_Return")
+        key_enter = _qt_value("Key", "Key_Enter")
+        key_up = _qt_value("Key", "Key_Up")
+        key_down = _qt_value("Key", "Key_Down")
+
+        if _event_matches_key_sequence(event, self._voice_shortcut_text):
+            self.voice_toggle_requested.emit()
+            event.accept()
+            return
+        if modifiers & control and key in (key_return, key_enter):
+            self.send_requested.emit()
+            event.accept()
+            return
+        if key == key_up and not modifiers:
+            self.previous_requested.emit()
+            event.accept()
+            return
+        if key == key_down and not modifiers:
+            self.next_requested.emit()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+
+class AttachmentThumbnail(QLabel):
+    """Clickable thumbnail for a pending image attachment."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        """Open preview on left-click."""
+        if event.button() == _qt_value("MouseButton", "LeftButton"):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class CanvasRegionCapture(QObject):
+    """Event filter that lets the user drag a screenshot rectangle on a canvas."""
+
+    finished = pyqtSignal(object)
+    cancelled = pyqtSignal()
+
+    def __init__(self, widget, parent=None):
+        super().__init__(parent)
+        self.widget = widget
+        self.origin = QPoint()
+        self.rubber_band = None
+        self.active = False
+        self._prior_mouse_tracking = None
+
+    def start(self):
+        """Begin capturing mouse events from the canvas widget."""
+        self.widget.installEventFilter(self)
+        try:
+            self._prior_mouse_tracking = bool(self.widget.hasMouseTracking())
+        except Exception:
+            self._prior_mouse_tracking = None
+        self.widget.setMouseTracking(True)
+        self.widget.setCursor(_qt_value("CursorShape", "CrossCursor"))
+        self.widget.setFocus()
+
+    def stop(self):
+        """Stop capture and remove temporary UI."""
+        self.widget.removeEventFilter(self)
+        self.widget.unsetCursor()
+        if self._prior_mouse_tracking is not None:
+            self.widget.setMouseTracking(self._prior_mouse_tracking)
+            self._prior_mouse_tracking = None
+        if self.rubber_band is not None:
+            self.rubber_band.hide()
+            self.rubber_band.deleteLater()
+            self.rubber_band = None
+        self.active = False
+
+    def eventFilter(self, watched, event):
+        """Capture a press-drag-release rectangle or cancel on Escape."""
+        if watched is not self.widget:
+            return False
+        event_type = event.type()
+        mouse_press = _enum_value(QEvent, "Type", "MouseButtonPress")
+        mouse_move = _enum_value(QEvent, "Type", "MouseMove")
+        mouse_release = _enum_value(QEvent, "Type", "MouseButtonRelease")
+        key_press = _enum_value(QEvent, "Type", "KeyPress")
+        left_button = _qt_value("MouseButton", "LeftButton")
+        escape_key = _qt_value("Key", "Key_Escape")
+
+        if event_type == key_press and event.key() == escape_key:
+            self.stop()
+            self.cancelled.emit()
+            return True
+
+        if event_type == mouse_press and event.button() == left_button:
+            self.origin = event.pos()
+            band_shape = _enum_value(QRubberBand, "Shape", "Rectangle")
+            self.rubber_band = QRubberBand(band_shape, self.widget)
+            self.rubber_band.setGeometry(QRect(self.origin, QSize()))
+            self.rubber_band.show()
+            self.active = True
+            return True
+
+        if event_type == mouse_move and self.active and self.rubber_band is not None:
+            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+            return True
+
+        if (
+            event_type == mouse_release
+            and self.active
+            and event.button() == left_button
+        ):
+            rect = QRect(self.origin, event.pos()).normalized()
+            self.stop()
+            self.finished.emit(rect)
+            return True
+
+        return False
+
+
+class ScreenRegionCapture(QWidget):
+    """Fullscreen overlay for selecting a screenshot region outside the canvas."""
+
+    finished = pyqtSignal(object)
+    cancelled = pyqtSignal()
+
+    def __init__(self, screen):
+        super().__init__(None)
+        self.screen_obj = screen or QGuiApplication.primaryScreen()
+        self.origin = QPoint()
+        self.rubber_band = None
+        self.active = False
+        frameless = _qt_value("WindowType", "FramelessWindowHint")
+        on_top = _qt_value("WindowType", "WindowStaysOnTopHint")
+        tool = _qt_value("WindowType", "Tool")
+        self.setWindowFlags(frameless | on_top | tool)
+        self.setCursor(_qt_value("CursorShape", "CrossCursor"))
+        self.setStyleSheet("background: rgba(0, 0, 0, 35);")
+        translucent = _qt_value("WidgetAttribute", "WA_TranslucentBackground")
+        self.setAttribute(translucent, True)
+        self.setGeometry(self.screen_obj.geometry())
+
+    def start(self):
+        """Show the overlay on the target screen."""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.setFocus()
+
+    def keyPressEvent(self, event):
+        """Cancel region capture on Escape."""
+        if event.key() == _qt_value("Key", "Key_Escape"):
+            self.cancelled.emit()
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        """Start the screen region selection."""
+        if event.button() != _qt_value("MouseButton", "LeftButton"):
+            return
+        self.origin = event.pos()
+        band_shape = _enum_value(QRubberBand, "Shape", "Rectangle")
+        self.rubber_band = QRubberBand(band_shape, self)
+        self.rubber_band.setGeometry(QRect(self.origin, QSize()))
+        self.rubber_band.show()
+        self.active = True
+
+    def mouseMoveEvent(self, event):
+        """Update the selected screen region."""
+        if self.active and self.rubber_band is not None:
+            self.rubber_band.setGeometry(QRect(self.origin, event.pos()).normalized())
+
+    def mouseReleaseEvent(self, event):
+        """Finish screen region selection and emit the global selection rectangle."""
+        if not self.active or event.button() != _qt_value("MouseButton", "LeftButton"):
+            return
+        local_rect = QRect(self.origin, event.pos()).normalized()
+        global_rect = QRect(self.mapToGlobal(local_rect.topLeft()), local_rect.size())
+        self.active = False
+        if self.rubber_band is not None:
+            self.rubber_band.hide()
+        self.hide()
+        QTimer.singleShot(100, lambda: self._finish_capture(global_rect))
+
+    def _finish_capture(self, global_rect):
+        """Emit the selected region after the overlay has been hidden."""
+        self.finished.emit(global_rect)
+        self.close()
+        self.deleteLater()
+
+
+class ChatWorker(QThread):
+    """Run GeoAgent chat without blocking the QGIS UI."""
+
+    finished = pyqtSignal(dict)
+    chunk_received = pyqtSignal(str)
+
+    def __init__(
+        self,
+        iface,
+        prompt,
+        provider,
+        model_id,
+        fast,
+        max_tokens,
+        auto_approve_tools=False,
+        stream=False,
+        agent_mode=DEFAULT_AGENT_MODE,
+        permission_profile=DEFAULT_PERMISSION_PROFILE,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.iface = iface
+        self.prompt = prompt
+        self.provider = provider
+        self.model_id = model_id or None
+        self.fast = fast
+        self.max_tokens = max_tokens
+        self.auto_approve_tools = bool(auto_approve_tools)
+        self.stream = bool(stream)
+        self.agent_mode = agent_mode or DEFAULT_AGENT_MODE
+        self.permission_profile = permission_profile or DEFAULT_PERMISSION_PROFILE
+        if self.permission_profile == "Trusted auto-approve":
+            self.auto_approve_tools = True
+
+    def run(self):
+        """Create a GeoAgent QGIS agent and execute one chat turn."""
+        try:
+            from geoagent import GeoAgentConfig
+            import geoagent
+
+            try:
+                from qgis.core import QgsProject
+
+                project = QgsProject.instance()
+            except Exception:
+                project = None
+
+            config = GeoAgentConfig(
+                provider=self.provider,
+                model=self.model_id,
+                max_tokens=self.max_tokens,
+            )
+            factory_name = {
+                "General QGIS": "for_qgis",
+                "WhiteboxTools": "for_whitebox",
+                "NASA Earthdata": "for_nasa_earthdata",
+                "NASA OPERA": "for_nasa_opera",
+                "GEE Data Catalogs": "for_gee_data_catalogs",
+                "STAC": "for_stac",
+                "Timelapse": "for_timelapse",
+                "Vantor": "for_vantor",
+                "GeoAI": "for_geoai",
+                "HyperCoast": "for_hypercoast",
+            }.get(self.agent_mode, "for_qgis")
+            if not hasattr(geoagent, factory_name):
+                import importlib
+
+                factory_module = sys.modules.get("geoagent.core.factory")
+                if factory_module is not None:
+                    importlib.reload(factory_module)
+                geoagent = importlib.reload(geoagent)
+                from geoagent import GeoAgentConfig
+
+            factory = getattr(geoagent, factory_name)
+            kwargs = {
+                "project": project,
+                "config": config,
+                "fast": self.fast,
+                "confirm": self._confirm_tool,
+            }
+            if self.permission_profile:
+                kwargs["permission_profile"] = self.permission_profile
+            try:
+                agent = factory(self.iface, **kwargs)
+            except TypeError as exc:
+                if "permission_profile" not in str(exc):
+                    raise
+                kwargs.pop("permission_profile", None)
+                agent = factory(self.iface, **kwargs)
+            agent = _filter_tools_for_permission(agent, self.permission_profile)
+            if self.agent_mode == "STAC":
+                self.prompt = (
+                    "You are in STAC mode. Use available STAC search, asset "
+                    "inspection, and QGIS loading tools when they fit the "
+                    "request. If loading is not possible, explain the selected "
+                    "asset URL and the reason clearly.\n\n"
+                    f"{self.prompt}"
+                )
+            if self.stream:
+                self._run_streaming_chat(agent)
+                return
+
+            response = agent.chat(self.prompt)
+
+            if self.isInterruptionRequested():
+                self.finished.emit(
+                    {
+                        "success": False,
+                        "answer": "",
+                        "error": "",
+                        "images": getattr(response, "images", []) or [],
+                        "tools": ", ".join(response.executed_tools or []),
+                        "tool_calls": response.tool_calls or [],
+                        "cancelled": ", ".join(response.cancelled_tools or []),
+                        "elapsed": f"{response.execution_time:.2f}s",
+                        "cancelled_by_user": True,
+                    }
+                )
+                return
+
+            self.finished.emit(
+                {
+                    "success": bool(response.success),
+                    "answer": response.answer_text or "",
+                    "error": response.error_message or "",
+                    "images": getattr(response, "images", []) or [],
+                    "tools": ", ".join(response.executed_tools or []),
+                    "tool_calls": response.tool_calls or [],
+                    "cancelled": ", ".join(response.cancelled_tools or []),
+                    "elapsed": f"{response.execution_time:.2f}s",
+                    "cancelled_by_user": False,
+                }
+            )
+        except Exception as exc:
+            formatted_error = _format_chat_worker_error(
+                exc,
+                provider=self.provider,
+                agent_mode=self.agent_mode,
+            )
+            QgsMessageLog.logMessage(
+                f"Chat worker failed:\n{traceback.format_exc()}",
+                "OpenGeoAgent",
+                Qgis.MessageLevel.Critical,
+            )
+            self.finished.emit(
+                {
+                    "success": False,
+                    "answer": "",
+                    "error": formatted_error,
+                    "images": [],
+                    "tools": "",
+                    "cancelled": "",
+                    "elapsed": "",
+                    "cancelled_by_user": self.isInterruptionRequested(),
+                }
+            )
+
+    def _run_streaming_chat(self, agent):
+        """Stream one chat turn and emit text chunks as they arrive."""
+        started_at = time.time()
+        chunks = []
+        final_result = None
+
+        async def _collect_stream():
+            nonlocal final_result
+            async for event in agent.stream_chat(self.prompt):
+                if self.isInterruptionRequested():
+                    break
+                if not isinstance(event, dict):
+                    continue
+                if "data" in event:
+                    chunk = str(event["data"])
+                    chunks.append(chunk)
+                    self.chunk_received.emit(chunk)
+                if "result" in event:
+                    final_result = event["result"]
+
+        asyncio.run(_collect_stream())
+
+        tool_metrics = getattr(
+            getattr(final_result, "metrics", None), "tool_metrics", {}
+        )
+        try:
+            from geoagent.core.agent import (
+                _result_to_images,
+                _result_to_text,
+                _tool_calls_to_images,
+            )
+
+            tool_calls = list(getattr(agent, "_tool_calls", []) or [])
+            images = _result_to_images(final_result) + _tool_calls_to_images(tool_calls)
+            final_text = _result_to_text(final_result)
+        except Exception:
+            images = []
+            final_text = ""
+            tool_calls = list(getattr(agent, "_tool_calls", []) or [])
+        executed_tools = (
+            list(tool_metrics.keys()) if isinstance(tool_metrics, dict) else []
+        )
+        stop_reason = str(getattr(final_result, "stop_reason", "end_turn"))
+        failure_stop_reasons = ("cancelled", "guardrail_intervened", "max_tokens")
+        success = stop_reason not in failure_stop_reasons
+        if self.isInterruptionRequested():
+            success = False
+
+        if success:
+            error_text = ""
+        else:
+            error_text = _format_chat_worker_error(
+                RuntimeError(f"stop_reason={stop_reason}"),
+                provider=self.provider,
+                agent_mode=self.agent_mode,
+            )
+
+        self.finished.emit(
+            {
+                "success": success,
+                "answer": "".join(chunks) or final_text,
+                "error": error_text,
+                "images": images,
+                "tools": ", ".join(executed_tools),
+                "tool_calls": tool_calls,
+                "cancelled": ", ".join(getattr(agent, "_cancelled", []) or []),
+                "elapsed": f"{time.time() - started_at:.2f}s",
+                "cancelled_by_user": self.isInterruptionRequested(),
+                "streamed": True,
+            }
+        )
+
+    def _confirm_tool(self, request):
+        """Ask the QGIS user before running confirmation-required tools."""
+        if self.isInterruptionRequested():
+            return False
+        if self.auto_approve_tools:
+            return True
+
+        from geoagent.tools._qt_marshal import run_on_qt_gui_thread
+
+        def _ask():
+            parent = None
+            try:
+                parent = self.iface.mainWindow()
+            except Exception as exc:
+                QgsMessageLog.logMessage(
+                    "Could not resolve QGIS main window for confirmation dialog: "
+                    f"{exc}",
+                    "OpenGeoAgent",
+                    Qgis.MessageLevel.Warning,
+                )
+
+            arg_lines = []
+            for key, value in request.args.items():
+                text = str(value)
+                if len(text) > 160:
+                    text = text[:157] + "..."
+                arg_lines.append(f"{key}: {text}")
+
+            details = "\n".join(arg_lines) if arg_lines else "No arguments"
+            message = (
+                f"GeoAgent wants to run:\n\n{request.tool_name}\n\n"
+                f"{details}\n\nAllow this action?"
+            )
+            reply = QMessageBox.question(
+                parent,
+                "Confirm GeoAgent Tool",
+                message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            return reply == QMessageBox.StandardButton.Yes
+
+        return bool(run_on_qt_gui_thread(_ask))
+
+
+class VoiceTranscriptionWorker(QThread):
+    """Transcribe a recorded audio file without blocking the QGIS UI."""
+
+    finished = pyqtSignal(dict)
+
+    def __init__(self, audio_path, settings, parent=None):
+        super().__init__(parent)
+        self.audio_path = audio_path
+        self.settings = settings
+
+    def run(self):
+        """Send the recorded audio to OpenAI speech-to-text."""
+        try:
+            _apply_environment_from_settings(self.settings)
+            api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError(
+                    "Voice transcription requires an OpenAI API key. Add one in "
+                    "OpenGeoAgent Settings > Model, or set OPENAI_API_KEY."
+                )
+
+            from openai import OpenAI
+
+            model = _transcription_model_from_settings(self.settings)
+            client = OpenAI(api_key=api_key)
+            with open(self.audio_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    model=model,
+                    file=audio_file,
+                )
+            text = getattr(transcription, "text", "")
+            if not text and isinstance(transcription, dict):
+                text = transcription.get("text", "")
+            text = str(text or "").strip()
+            if not text:
+                raise RuntimeError("OpenAI returned an empty transcription.")
+            self.finished.emit({"success": True, "text": text, "error": ""})
+        except Exception as exc:
+            self.finished.emit(
+                {
+                    "success": False,
+                    "text": "",
+                    "error": f"{exc}\n\n{traceback.format_exc()}",
+                }
+            )
+
+
+class VoicePromptRecorder(QObject):
+    """Stream microphone PCM audio directly to a WAV file."""
+
+    level_changed = pyqtSignal(int)
+    limit_reached = pyqtSignal()
+
+    MAX_RECORDING_SECONDS = 600
+
+    def __init__(self, audio_path, parent=None):
+        super().__init__(parent)
+        self.audio_path = audio_path
+        self._audio_source = None
+        self._audio_device = None
+        self._format = None
+        self._io_device = None
+        self._wav_file = None
+        self._bytes_written = 0
+        self._max_bytes = 0
+        self._limit_signaled = False
+        try:
+            self._multimedia = importlib.import_module("qgis.PyQt.QtMultimedia")
+        except ImportError as exc:
+            raise RuntimeError(
+                "This QGIS/PyQt build does not expose QtMultimedia. Voice input "
+                "requires Qt multimedia support for microphone recording."
+            ) from exc
+
+    def record(self):
+        """Start capturing microphone samples and stream them to disk."""
+        self._audio_device, self._format = self._select_audio_format()
+        wav_file = wave.open(self.audio_path, "wb")
+        try:
+            wav_file.setnchannels(self._channel_count(self._format))
+            wav_file.setsampwidth(self._sample_width(self._format))
+            wav_file.setframerate(self._sample_rate(self._format))
+        except Exception:
+            wav_file.close()
+            raise
+        self._wav_file = wav_file
+        bytes_per_second = (
+            self._sample_rate(self._format)
+            * self._channel_count(self._format)
+            * self._sample_width(self._format)
+        )
+        self._max_bytes = max(1, bytes_per_second * self.MAX_RECORDING_SECONDS)
+
+        try:
+            self._audio_source = self._create_audio_source(
+                self._audio_device, self._format
+            )
+            self._io_device = self._audio_source.start()
+        except Exception:
+            self._close_wav_file()
+            raise
+        if self._io_device is None:
+            self._close_wav_file()
+            raise RuntimeError("Could not open the default microphone for recording.")
+        self._io_device.readyRead.connect(self._read_available)
+
+    def stop(self):
+        """Stop capturing and finalize the WAV file."""
+        if self._io_device is not None:
+            self._read_available()
+        if self._audio_source is not None:
+            self._audio_source.stop()
+        self._io_device = None
+
+        bytes_written = self._bytes_written
+        self._close_wav_file()
+
+        if bytes_written <= 0:
+            raise RuntimeError(
+                "No microphone audio was captured. Check the selected input device "
+                "and OS microphone permission for QGIS."
+            )
+
+    def _read_available(self):
+        """Stream available microphone bytes to the WAV file under the size cap."""
+        if self._io_device is None or self._wav_file is None:
+            return
+        data = self._io_device.readAll()
+        if not data:
+            return
+        chunk = bytes(data)
+        remaining = self._max_bytes - self._bytes_written
+        if remaining <= 0:
+            self._signal_limit_reached()
+            return
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
+        self._wav_file.writeframes(chunk)
+        self._bytes_written += len(chunk)
+        self.level_changed.emit(self._audio_level(chunk))
+        if self._bytes_written >= self._max_bytes:
+            self._signal_limit_reached()
+
+    def _signal_limit_reached(self):
+        """Notify listeners once when the recording cap is reached."""
+        if self._limit_signaled:
+            return
+        self._limit_signaled = True
+        self.limit_reached.emit()
+
+    def _close_wav_file(self):
+        """Close the open WAV file if any, logging close errors."""
+        if self._wav_file is None:
+            return
+        try:
+            self._wav_file.close()
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"Failed to close voice WAV file: {exc}",
+                "OpenGeoAgent",
+                Qgis.MessageLevel.Warning,
+            )
+        self._wav_file = None
+
+    def _select_audio_format(self):
+        """Return a default input device and an Int16 mono audio format."""
+        multimedia = self._multimedia
+        audio_format = multimedia.QAudioFormat()
+        audio_format.setSampleRate(16000)
+        audio_format.setChannelCount(1)
+
+        if hasattr(audio_format, "setSampleFormat"):
+            sample_format = getattr(audio_format, "SampleFormat")
+            audio_format.setSampleFormat(getattr(sample_format, "Int16"))
+            device = multimedia.QMediaDevices.defaultAudioInput()
+            if self._device_is_null(device):
+                raise RuntimeError("No default microphone input device was found.")
+            if hasattr(device, "isFormatSupported") and not device.isFormatSupported(
+                audio_format
+            ):
+                preferred = device.preferredFormat()
+                if self._sample_width(preferred) != 2:
+                    raise RuntimeError(
+                        "The default microphone does not expose 16-bit PCM audio, "
+                        "which OpenGeoAgent needs for WAV recording."
+                    )
+                audio_format = preferred
+            return device, audio_format
+
+        audio_format.setSampleSize(16)
+        audio_format.setCodec("audio/pcm")
+        audio_format.setByteOrder(
+            _enum_value(multimedia.QAudioFormat, "Endian", "LittleEndian")
+        )
+        audio_format.setSampleType(
+            _enum_value(multimedia.QAudioFormat, "SampleType", "SignedInt")
+        )
+        device = multimedia.QAudioDeviceInfo.defaultInputDevice()
+        if self._device_is_null(device):
+            raise RuntimeError("No default microphone input device was found.")
+        if not device.isFormatSupported(audio_format):
+            audio_format = device.nearestFormat(audio_format)
+        if self._sample_width(audio_format) != 2:
+            raise RuntimeError(
+                "The default microphone does not expose 16-bit PCM audio, "
+                "which OpenGeoAgent needs for WAV recording."
+            )
+        return device, audio_format
+
+    def _create_audio_source(self, device, audio_format):
+        """Create the Qt audio input object for Qt 5 or Qt 6."""
+        multimedia = self._multimedia
+        if hasattr(multimedia, "QAudioSource"):
+            return multimedia.QAudioSource(device, audio_format, self)
+        try:
+            return multimedia.QAudioInput(device, audio_format, self)
+        except TypeError:
+            return multimedia.QAudioInput(audio_format, self)
+
+    @staticmethod
+    def _audio_level(chunk):
+        """Return a rough 0-100 input level for 16-bit PCM samples."""
+        if len(chunk) < 2:
+            return 0
+        if len(chunk) % 2:
+            chunk = chunk[:-1]
+        samples = array.array("h")
+        samples.frombytes(chunk)
+        if not samples:
+            return 0
+        if len(samples) > 800:
+            step = max(1, len(samples) // 800)
+            samples = samples[::step]
+        peak = max(abs(sample) for sample in samples)
+        return min(100, int((peak / 32767) * 100))
+
+    @staticmethod
+    def _device_is_null(device):
+        is_null = getattr(device, "isNull", None)
+        return bool(is_null()) if callable(is_null) else False
+
+    @staticmethod
+    def _channel_count(audio_format):
+        value = getattr(audio_format, "channelCount", None)
+        return int(value()) if callable(value) else 1
+
+    @staticmethod
+    def _sample_rate(audio_format):
+        value = getattr(audio_format, "sampleRate", None)
+        return int(value()) if callable(value) else 16000
+
+    @staticmethod
+    def _sample_width(audio_format):
+        sample_format = getattr(audio_format, "sampleFormat", None)
+        if callable(sample_format):
+            name = str(sample_format()).split(".")[-1].lower()
+            if name == "uint8":
+                return 1
+            if name in {"int16", "unknown"}:
+                return 2
+            if name in {"int32", "float"}:
+                return 4
+        sample_size = getattr(audio_format, "sampleSize", None)
+        if callable(sample_size):
+            return max(1, int(sample_size()) // 8)
+        return 2
+
+
+class ChatDockWidget(QDockWidget):
+    """Dock widget that sends user prompts to a GeoAgent QGIS agent."""
+
+    def __init__(self, iface, parent=None):
+        super().__init__("OpenGeoAgent Chat", parent)
+        self.iface = iface
+        self.settings = QSettings()
+        self._worker = None
+        self._voice_worker = None
+        self._voice_recorder = None
+        self._voice_recorder_refs = []
+        self._voice_audio_path = ""
+        self._voice_stopping = False
+        self._loading_settings = False
+        self._region_capture = None
+        self._screen_region_capture = None
+        self._prompt_history = []
+        self._history_index = None
+        self._messages = []
+        self._last_script_snippet = {}
+        self._image_attachments = []
+        self._transcript_image_links = {}
+        self._streaming_message_index = None
+        self._streaming_answer = ""
+        self._status_started_at = None
+        self._status_base_text = "Running"
+        self._status_frame = 0
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(500)
+        self._status_timer.timeout.connect(self._update_running_status)
+        self._stream_render_timer = QTimer(self)
+        self._stream_render_timer.setSingleShot(True)
+        self._stream_render_timer.setInterval(75)
+        self._stream_render_timer.timeout.connect(self._flush_streaming_render)
+        self._history_key = _project_history_key(iface)
+        self._jobs = []
+        self._active_job_index = None
+
+        self.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.setMinimumWidth(220)
+
+        self._setup_ui()
+        self._load_settings()
+
+    def _setup_ui(self):
+        """Build the chat dock widgets and signal connections."""
+        main_widget = QWidget()
+        self.setWidget(main_widget)
+
+        layout = QVBoxLayout(main_widget)
+        layout.setSpacing(8)
+
+        self.model_group = QGroupBox("Model")
+        self.model_group.setCheckable(True)
+        self.model_group.setChecked(True)
+        self.model_group.toggled.connect(self._on_model_section_toggled)
+        model_group_layout = QVBoxLayout(self.model_group)
+        model_group_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.model_controls = QWidget()
+        model_layout = QFormLayout(self.model_controls)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_group_layout.addWidget(self.model_controls)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(PROVIDERS)
+        self.provider_combo.setMinimumContentsLength(8)
+        self.provider_combo.setSizeAdjustPolicy(
+            _enum_value(
+                QComboBox,
+                "SizeAdjustPolicy",
+                "AdjustToMinimumContentsLengthWithIcon",
+            )
+        )
+        self.provider_combo.setSizePolicy(
+            _enum_value(QSizePolicy, "Policy", "Ignored"),
+            _enum_value(QSizePolicy, "Policy", "Fixed"),
+        )
+        self.provider_combo.currentTextChanged.connect(self._on_provider_changed)
+        model_layout.addRow("Provider:", self.provider_combo)
+
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("Use provider default")
+        self.model_input.setSizePolicy(
+            _enum_value(QSizePolicy, "Policy", "Ignored"),
+            _enum_value(QSizePolicy, "Policy", "Fixed"),
+        )
+        model_layout.addRow("Model:", self.model_input)
+
+        self.agent_mode_combo = QComboBox()
+        self.agent_mode_combo.addItems(AGENT_MODES)
+        self.agent_mode_combo.setSizePolicy(
+            _enum_value(QSizePolicy, "Policy", "Ignored"),
+            _enum_value(QSizePolicy, "Policy", "Fixed"),
+        )
+        self.agent_mode_combo.currentTextChanged.connect(self._on_agent_mode_changed)
+        model_layout.addRow("Agent mode:", self.agent_mode_combo)
+
+        self.permission_combo = QComboBox()
+        self.permission_combo.addItems(PERMISSION_PROFILES)
+        self.permission_combo.setSizePolicy(
+            _enum_value(QSizePolicy, "Policy", "Ignored"),
+            _enum_value(QSizePolicy, "Policy", "Fixed"),
+        )
+        self.permission_combo.currentTextChanged.connect(
+            self._on_permission_profile_changed
+        )
+        model_layout.addRow("Permissions:", self.permission_combo)
+
+        self.fast_check = QCheckBox("Fast mode")
+        self.stream_check = QCheckBox("Stream output")
+        self.auto_approve_tools_check = QCheckBox("Auto approve running tools")
+        self.auto_approve_tools_check.setToolTip(
+            "Run confirmation-required tools without prompting for this session."
+        )
+        self.stream_check.setToolTip(
+            "Show model text as it arrives instead of waiting for the full response."
+        )
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(self.fast_check)
+        mode_layout.addWidget(self.stream_check)
+        mode_layout.addWidget(self.auto_approve_tools_check)
+        mode_layout.addStretch(1)
+        model_layout.addRow("", mode_layout)
+
+        self.tool_availability_label = QLabel("Tool availability will appear here.")
+        self.tool_availability_label.setWordWrap(True)
+        self.tool_availability_label.setStyleSheet("font-size: 10px; color: gray;")
+        model_layout.addRow("Tools:", self.tool_availability_label)
+
+        layout.addWidget(self.model_group)
+
+        sample_layout = QHBoxLayout()
+        self.sample_combo = QComboBox()
+        self.sample_combo.addItem("Sample prompts...")
+        self.sample_combo.addItems(_all_sample_prompts())
+        self.sample_combo.setMinimumContentsLength(14)
+        self.sample_combo.setSizeAdjustPolicy(
+            _enum_value(
+                QComboBox,
+                "SizeAdjustPolicy",
+                "AdjustToMinimumContentsLengthWithIcon",
+            )
+        )
+        self.sample_combo.setSizePolicy(
+            _enum_value(QSizePolicy, "Policy", "Ignored"),
+            _enum_value(QSizePolicy, "Policy", "Fixed"),
+        )
+        self.sample_combo.currentTextChanged.connect(self._select_sample_prompt)
+        sample_layout.addWidget(self.sample_combo, 1)
+        layout.addLayout(sample_layout)
+
+        self.jobs_group = QGroupBox("Jobs")
+        self.jobs_group.setCheckable(True)
+        self.jobs_group.setChecked(True)
+        self.jobs_group.toggled.connect(self._on_jobs_section_toggled)
+        jobs_layout = QVBoxLayout(self.jobs_group)
+
+        self.jobs_controls = QWidget()
+        jobs_controls_layout = QVBoxLayout(self.jobs_controls)
+        jobs_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.jobs_table = QTableWidget(0, 4)
+        self.jobs_table.setHorizontalHeaderLabels(
+            ["Status", "Mode", "Prompt", "Details"]
+        )
+        self.jobs_table.setMaximumHeight(120)
+        self.jobs_table.setSelectionBehavior(
+            _enum_value(QAbstractItemView, "SelectionBehavior", "SelectRows")
+        )
+        self.jobs_table.setSelectionMode(
+            _enum_value(QAbstractItemView, "SelectionMode", "SingleSelection")
+        )
+        self.jobs_table.setEditTriggers(
+            _enum_value(QAbstractItemView, "EditTrigger", "NoEditTriggers")
+        )
+        jobs_header = self.jobs_table.horizontalHeader()
+        if jobs_header is not None:
+            stretch = _enum_value(QHeaderView, "ResizeMode", "Stretch")
+            jobs_header.setSectionResizeMode(stretch)
+        jobs_controls_layout.addWidget(self.jobs_table)
+        jobs_btn_layout = QHBoxLayout()
+        self.rerun_job_btn = QPushButton("Rerun Job")
+        self.rerun_job_btn.clicked.connect(self._rerun_selected_job)
+        jobs_btn_layout.addWidget(self.rerun_job_btn)
+        self.cancel_job_btn = QPushButton("Cancel Active")
+        self.cancel_job_btn.clicked.connect(self._cancel_running_task)
+        self.cancel_job_btn.setEnabled(False)
+        jobs_btn_layout.addWidget(self.cancel_job_btn)
+        jobs_btn_layout.addStretch(1)
+        jobs_controls_layout.addLayout(jobs_btn_layout)
+        jobs_layout.addWidget(self.jobs_controls)
+        layout.addWidget(self.jobs_group)
+
+        self.transcript = QTextBrowser()
+        self.transcript.setReadOnly(True)
+        self.transcript.setAcceptRichText(True)
+        self.transcript.setOpenLinks(False)
+        self.transcript.setOpenExternalLinks(False)
+        self.transcript.anchorClicked.connect(self._on_transcript_anchor_clicked)
+        self.transcript.setPlaceholderText("Conversation will appear here.")
+        layout.addWidget(self.transcript, 1)
+
+        self.prompt_input = PromptTextEdit()
+        self.prompt_input.setPlaceholderText(
+            "Ask about the current QGIS project or request a map action."
+        )
+        self.prompt_input.setMaximumHeight(90)
+        self.prompt_input.send_requested.connect(self._send_prompt)
+        self.prompt_input.previous_requested.connect(self._previous_prompt)
+        self.prompt_input.next_requested.connect(self._next_prompt)
+        self.prompt_input.image_pasted.connect(self._add_clipboard_image)
+        self.prompt_input.voice_toggle_requested.connect(self._toggle_voice_recording)
+
+        self.attachment_bar = QWidget()
+        self.attachment_layout = QHBoxLayout(self.attachment_bar)
+        self.attachment_layout.setContentsMargins(0, 0, 0, 0)
+        self.attachment_layout.setSpacing(6)
+        self.attachment_bar.setVisible(False)
+        layout.addWidget(self.attachment_bar)
+        layout.addWidget(self.prompt_input)
+
+        button_rows = QVBoxLayout()
+        button_rows.setSpacing(4)
+        primary_button_layout = QHBoxLayout()
+        primary_button_layout.setSpacing(6)
+        secondary_button_layout = QHBoxLayout()
+        secondary_button_layout.setSpacing(6)
+        self.voice_btn = QPushButton()
+        mic_icon_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "icons", "mic.svg"
+        )
+        mic_icon = QIcon.fromTheme("audio-input-microphone")
+        if mic_icon.isNull():
+            mic_icon = QIcon(mic_icon_path)
+        self.voice_btn.setIcon(mic_icon)
+        self.voice_btn.setIconSize(QSize(18, 18))
+        self.voice_btn.setAccessibleName("Voice input")
+        self.voice_btn.setToolTip(
+            "Record speech, transcribe it with the OpenAI transcription API, "
+            "and insert the text into the prompt editor."
+        )
+        self.voice_btn.setCheckable(True)
+        self.voice_btn.setMinimumWidth(32)
+        self.voice_btn.setMaximumWidth(38)
+        self.voice_btn.clicked.connect(self._toggle_voice_recording)
+        primary_button_layout.addWidget(self.voice_btn)
+        self._configure_voice_shortcut()
+
+        self.voice_level = QProgressBar()
+        self.voice_level.setRange(0, 100)
+        self.voice_level.setValue(0)
+        self.voice_level.setTextVisible(False)
+        self.voice_level.setMaximumWidth(72)
+        self.voice_level.setFixedHeight(12)
+        self._set_voice_level_idle()
+        primary_button_layout.addWidget(self.voice_level)
+
+        self.send_btn = QPushButton("Send")
+        self.send_btn.clicked.connect(self._send_prompt)
+        primary_button_layout.addWidget(self.send_btn)
+
+        self.screenshot_btn = QPushButton("Screenshot")
+        screenshot_menu = QMenu(self.screenshot_btn)
+        screenshot_menu.addAction("Capture Map Canvas", self._capture_map_canvas)
+        screenshot_menu.addAction("Select Region", self._start_region_capture)
+        screenshot_menu.addSeparator()
+        screenshot_menu.addAction("Capture QGIS Window", self._capture_qgis_window)
+        screenshot_menu.addAction(
+            "Select Screen Region", self._start_screen_region_capture
+        )
+        self.screenshot_btn.setMenu(screenshot_menu)
+        primary_button_layout.addWidget(self.screenshot_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setToolTip(
+            "Stops GeoAgent at the next checkpoint. The in-flight model "
+            "request and any tool already running cannot be aborted "
+            "mid-call; cancellation takes effect between steps."
+        )
+        self.cancel_btn.clicked.connect(self._cancel_running_task)
+        primary_button_layout.addWidget(self.cancel_btn)
+
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self._clear_transcript)
+        primary_button_layout.addWidget(self.clear_btn)
+
+        self.export_md_btn = QPushButton("Export")
+        self.export_md_btn.clicked.connect(self._export_transcript_markdown)
+        secondary_button_layout.addWidget(self.export_md_btn)
+
+        self.import_md_btn = QPushButton("Import")
+        self.import_md_btn.clicked.connect(self._import_transcript_markdown)
+        secondary_button_layout.addWidget(self.import_md_btn)
+
+        self.copy_md_btn = QPushButton("Copy MD")
+        self.copy_md_btn.setEnabled(False)
+        self.copy_md_btn.setToolTip("Copy the full chat transcript as Markdown.")
+        self.copy_md_btn.clicked.connect(self._copy_transcript_markdown)
+        secondary_button_layout.addWidget(self.copy_md_btn)
+
+        self.copy_script_btn = QPushButton("Copy Script")
+        self.copy_script_btn.setEnabled(False)
+        self.copy_script_btn.setToolTip(
+            "Copy the most recent executable script or snippet from GeoAgent."
+        )
+        self.copy_script_btn.clicked.connect(self._copy_last_script_snippet)
+        secondary_button_layout.addWidget(self.copy_script_btn)
+
+        for button in (
+            self.send_btn,
+            self.voice_btn,
+            self.screenshot_btn,
+            self.cancel_btn,
+            self.clear_btn,
+            self.export_md_btn,
+            self.import_md_btn,
+            self.copy_md_btn,
+            self.copy_script_btn,
+        ):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                _enum_value(QSizePolicy, "Policy", "Ignored"),
+                _enum_value(QSizePolicy, "Policy", "Fixed"),
+            )
+
+        button_rows.addLayout(primary_button_layout)
+        button_rows.addLayout(secondary_button_layout)
+        layout.addLayout(button_rows)
+
+        self.status_label = QLabel("Ready. Ctrl+Enter sends. Up/Down cycles prompts.")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addWidget(self.status_label)
+
+    def _load_settings(self):
+        """Load persisted model settings into the dock controls."""
+        self._loading_settings = True
+        try:
+            provider = _setting(self.settings, "provider", DEFAULT_PROVIDER)
+            index = self.provider_combo.findText(provider)
+            if index < 0:
+                index = self.provider_combo.findText(DEFAULT_PROVIDER)
+            self.provider_combo.setCurrentIndex(index if index >= 0 else 0)
+
+            model = _setting(self.settings, "model", "")
+            if not model:
+                model = _default_model_for_provider(self.provider_combo.currentText())
+            self.model_input.setText(model)
+
+            self.fast_check.setChecked(
+                _setting(self.settings, "fast_mode", False, bool)
+            )
+            self.stream_check.setChecked(
+                _setting(self.settings, "stream_chat", True, bool)
+            )
+            self.auto_approve_tools_check.setChecked(
+                _setting(self.settings, "auto_approve_tools", False, bool)
+            )
+            expanded = _setting(self.settings, "model_section_expanded", True, bool)
+            self.model_group.setChecked(expanded)
+            self.model_controls.setVisible(expanded)
+            jobs_expanded = _setting(self.settings, "jobs_section_expanded", True, bool)
+            self.jobs_group.setChecked(jobs_expanded)
+            self.jobs_controls.setVisible(jobs_expanded)
+            mode = _setting(self.settings, "agent_mode", DEFAULT_AGENT_MODE)
+            index = self.agent_mode_combo.findText(mode)
+            self.agent_mode_combo.setCurrentIndex(index if index >= 0 else 0)
+            profile = _setting(
+                self.settings,
+                "permission_profile",
+                DEFAULT_PERMISSION_PROFILE,
+            )
+            profile = PERMISSION_PROFILE_ALIASES.get(profile, profile)
+            index = self.permission_combo.findText(profile)
+            self.permission_combo.setCurrentIndex(index if index >= 0 else 0)
+            if profile == "Trusted auto-approve":
+                self.auto_approve_tools_check.setChecked(True)
+        finally:
+            self._loading_settings = False
+        self._refresh_tool_availability()
+        self._load_project_history()
+
+    def _save_model_settings(self):
+        """Persist the selected provider, model, and fast-mode setting."""
+        provider = self.provider_combo.currentText()
+        model = self.model_input.text().strip() or _default_model_for_provider(provider)
+        if model and not self.model_input.text().strip():
+            self.model_input.setText(model)
+        self.settings.setValue(f"{SETTINGS_PREFIX}provider", provider)
+        self.settings.setValue(f"{SETTINGS_PREFIX}model", model)
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}fast_mode", self.fast_check.isChecked()
+        )
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}stream_chat", self.stream_check.isChecked()
+        )
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}auto_approve_tools",
+            self.auto_approve_tools_check.isChecked(),
+        )
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}agent_mode", self.agent_mode_combo.currentText()
+        )
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}permission_profile", self.permission_combo.currentText()
+        )
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}model_section_expanded", self.model_group.isChecked()
+        )
+
+    def _on_provider_changed(self, provider):
+        """Update the model field when the provider changes."""
+        self.model_input.setText(_default_model_for_provider(provider))
+
+    def _on_model_section_toggled(self, expanded):
+        """Show or hide model controls to keep the dock compact."""
+        if hasattr(self, "model_controls"):
+            self.model_controls.setVisible(bool(expanded))
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}model_section_expanded", bool(expanded)
+        )
+
+    def _on_jobs_section_toggled(self, expanded):
+        """Show or hide job controls to keep the dock compact."""
+        if hasattr(self, "jobs_controls"):
+            self.jobs_controls.setVisible(bool(expanded))
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}jobs_section_expanded", bool(expanded)
+        )
+
+    def _on_agent_mode_changed(self, mode):
+        """Load a mode-specific workflow prompt when useful."""
+        if hasattr(self, "_refresh_tool_availability"):
+            self._refresh_tool_availability()
+        if getattr(self, "_loading_settings", False):
+            return
+        if not hasattr(self, "prompt_input"):
+            return
+        prompts = WORKFLOW_PROMPTS.get(mode, [])
+        if prompts and not self.prompt_input.toPlainText().strip():
+            self.prompt_input.setPlainText(prompts[0])
+
+    def _on_permission_profile_changed(self, profile):
+        """Keep trusted profile and tool diagnostics in sync."""
+        if profile == "Trusted auto-approve" and hasattr(
+            self, "auto_approve_tools_check"
+        ):
+            self.auto_approve_tools_check.setChecked(True)
+        self._refresh_tool_availability()
+
+    def _refresh_tool_availability(self):
+        """Show the tool surface for the selected mode and permission profile."""
+        if not hasattr(self, "tool_availability_label"):
+            return
+        try:
+            from geoagent import GeoAgentContext
+            from geoagent.core.factory import assemble_tools
+
+            try:
+                from qgis.core import QgsProject
+
+                project = QgsProject.instance()
+            except Exception:
+                project = None
+
+            mode = self.agent_mode_combo.currentText()
+            profile = self.permission_combo.currentText()
+            ctx = GeoAgentContext(qgis_iface=self.iface, qgis_project=project)
+            kwargs = {
+                "context": ctx,
+                "include_qgis": True,
+                "include_image_generation": True,
+                "include_whitebox": mode == "WhiteboxTools",
+                "include_nasa_earthdata": mode == "NASA Earthdata",
+                "include_nasa_opera": mode == "NASA OPERA",
+                "include_gee_data_catalogs": mode == "GEE Data Catalogs",
+                "include_stac": mode == "STAC",
+                "include_timelapse": mode == "Timelapse",
+                "include_vantor": mode == "Vantor",
+                "include_geoai": mode == "GeoAI",
+                "include_hypercoast": mode == "HyperCoast",
+                "permission_profile": profile,
+                "fast": self.fast_check.isChecked(),
+            }
+            if mode == "STAC":
+                kwargs["exclude_tool_names"] = {"run_pyqgis_script"}
+            tools, registry = assemble_tools(**kwargs)
+            grouped = {}
+            for tool in tools:
+                name = (
+                    getattr(tool, "tool_name", "")
+                    or getattr(tool, "__name__", "")
+                    or getattr(tool, "name", "")
+                )
+                if not name:
+                    continue
+                meta = registry.get(str(name))
+                category = str(getattr(meta, "category", "") or "general")
+                grouped.setdefault(category, []).append(str(name))
+            if not grouped:
+                self.tool_availability_label.setText("No tools available.")
+                return
+            parts = []
+            for category in sorted(grouped):
+                names = sorted(grouped[category])
+                preview = ", ".join(names[:8])
+                if len(names) > 8:
+                    preview += f", +{len(names) - 8} more"
+                parts.append(f"{category}: {preview}")
+            self.tool_availability_label.setText(
+                f"{len(tools)} tools for {mode} / {profile}. " + " | ".join(parts)
+            )
+        except Exception as exc:
+            self.tool_availability_label.setText(
+                f"Tool availability unavailable: {type(exc).__name__}: {exc}"
+            )
+
+    def _add_clipboard_image(self, image):
+        """Attach an image pasted into the prompt editor."""
+        if len(self._image_attachments) >= MAX_IMAGE_ATTACHMENTS:
+            QMessageBox.information(
+                self,
+                "OpenGeoAgent",
+                f"Attach at most {MAX_IMAGE_ATTACHMENTS} images per message.",
+            )
+            return
+        try:
+            image_bytes, width, height = _image_to_png_bytes(image)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                f"Could not attach clipboard image:\n\n{exc}",
+            )
+            return
+        self._image_attachments.append(
+            {
+                "bytes": image_bytes,
+                "format": "png",
+                "width": width,
+                "height": height,
+            }
+        )
+        self._render_image_attachments()
+        self.status_label.setText(
+            f"Attached {len(self._image_attachments)} image"
+            f"{'s' if len(self._image_attachments) != 1 else ''}."
+        )
+        self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _render_image_attachments(self):
+        """Refresh the attachment thumbnail strip."""
+        while self.attachment_layout.count():
+            item = self.attachment_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if not self._image_attachments:
+            self.attachment_bar.setVisible(False)
+            return
+
+        for index, attachment in enumerate(self._image_attachments):
+            chip = QWidget()
+            chip_layout = QVBoxLayout(chip)
+            chip_layout.setContentsMargins(0, 0, 0, 0)
+            chip_layout.setSpacing(2)
+
+            thumb = AttachmentThumbnail()
+            thumb.setFixedSize(IMAGE_THUMBNAIL_SIZE, IMAGE_THUMBNAIL_SIZE)
+            thumb.setStyleSheet("border: 1px solid #BDBDBD; background: #FAFAFA;")
+            thumb.setAlignment(_qt_value("AlignmentFlag", "AlignCenter"))
+            thumb.setToolTip("Click to preview image")
+            thumb.setCursor(_qt_value("CursorShape", "PointingHandCursor"))
+            pixmap = QPixmap()
+            pixmap.loadFromData(attachment["bytes"], "PNG")
+            if not pixmap.isNull():
+                keep_aspect = _qt_value("AspectRatioMode", "KeepAspectRatio")
+                smooth = _qt_value("TransformationMode", "SmoothTransformation")
+                thumb.setPixmap(
+                    pixmap.scaled(
+                        QSize(IMAGE_THUMBNAIL_SIZE, IMAGE_THUMBNAIL_SIZE),
+                        keep_aspect,
+                        smooth,
+                    )
+                )
+            thumb.clicked.connect(
+                lambda checked=False, i=index: self._preview_image_attachment(i)
+            )
+            chip_layout.addWidget(thumb)
+
+            remove_btn = QPushButton("Remove")
+            remove_btn.setFixedWidth(IMAGE_THUMBNAIL_SIZE)
+            remove_btn.clicked.connect(
+                lambda checked=False, i=index: self._remove_image_attachment(i)
+            )
+            chip_layout.addWidget(remove_btn)
+            self.attachment_layout.addWidget(chip)
+
+        self.attachment_layout.addStretch(1)
+        self.attachment_bar.setVisible(True)
+
+    def _preview_image_attachment(self, index):
+        """Show a larger preview of a pending image attachment."""
+        if index < 0 or index >= len(self._image_attachments):
+            return
+        attachment = self._image_attachments[index]
+        image_bytes = attachment["bytes"]
+        pixmap = QPixmap()
+        pixmap.loadFromData(image_bytes, "PNG")
+        if pixmap.isNull():
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                "Could not preview this image attachment.",
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            f"Image Preview ({attachment['width']} x {attachment['height']})"
+        )
+        dialog.resize(900, 700)
+
+        layout = QVBoxLayout(dialog)
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(True)
+        image_label = QLabel()
+        image_label.setAlignment(_qt_value("AlignmentFlag", "AlignCenter"))
+        image_label.setContextMenuPolicy(
+            _qt_value("ContextMenuPolicy", "CustomContextMenu")
+        )
+
+        available = _screen_for_widget(self).availableGeometry()
+        max_width = max(320, int(available.width() * 0.8))
+        max_height = max(240, int(available.height() * 0.8))
+        if pixmap.width() > max_width or pixmap.height() > max_height:
+            keep_aspect = _qt_value("AspectRatioMode", "KeepAspectRatio")
+            smooth = _qt_value("TransformationMode", "SmoothTransformation")
+            pixmap = pixmap.scaled(max_width, max_height, keep_aspect, smooth)
+        image_label.setPixmap(pixmap)
+        scroll.setWidget(image_label)
+        layout.addWidget(scroll)
+
+        def save_image():
+            """Save the original PNG attachment bytes."""
+            default_name = f"opengeoagent-image-{time.strftime('%Y%m%d-%H%M%S')}.png"
+            default_path = os.path.join(os.path.expanduser("~"), default_name)
+            path, _selected_filter = QFileDialog.getSaveFileName(
+                dialog,
+                "Save Image",
+                default_path,
+                "PNG Images (*.png);;All Files (*)",
+            )
+            if not path:
+                return
+            if not os.path.splitext(path)[1]:
+                path = f"{path}.png"
+            try:
+                with open(path, "wb") as f:
+                    f.write(image_bytes)
+            except Exception as exc:
+                QMessageBox.warning(
+                    dialog,
+                    "OpenGeoAgent",
+                    f"Could not save image:\n\n{exc}",
+                )
+                return
+            self.status_label.setText(f"Saved image to {path}")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+        def show_context_menu(pos):
+            """Show preview image actions."""
+            menu = QMenu(image_label)
+            menu.addAction("Save Image As...", save_image)
+            _exec_menu(menu, image_label.mapToGlobal(pos))
+
+        image_label.customContextMenuRequested.connect(show_context_menu)
+
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton("Save Image")
+        save_btn.clicked.connect(save_image)
+        button_layout.addWidget(save_btn)
+        button_layout.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+        _exec_dialog(dialog)
+
+    def _preview_output_image(self, image):
+        """Show a full-resolution preview for a generated transcript image."""
+        path = str(image.get("path") or "").strip()
+        if not path:
+            QMessageBox.information(
+                self,
+                "OpenGeoAgent",
+                "This image is remote and cannot be previewed locally.",
+            )
+            return
+        path = os.path.expanduser(path)
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                f"Could not preview this image:\n\n{path}",
+            )
+            return
+
+        is_gif = (
+            path.lower().endswith(".gif")
+            or str(image.get("format") or "").lower() == "gif"
+        )
+        movie = None
+        if is_gif:
+            movie = QMovie(path)
+            if movie.isValid():
+                movie.jumpToFrame(0)
+                rect = movie.frameRect()
+                width = rect.width()
+                height = rect.height()
+                if width <= 0 or height <= 0:
+                    first_frame = movie.currentPixmap()
+                    width = first_frame.width()
+                    height = first_frame.height()
+                dialog = QDialog(self)
+                dialog.setWindowTitle(f"GIF Preview ({width} x {height})")
+                available = _screen_for_widget(self).availableGeometry()
+                dialog.resize(
+                    max(480, int(available.width() * 0.75)),
+                    max(360, int(available.height() * 0.75)),
+                )
+
+                layout = QVBoxLayout(dialog)
+                scroll = QScrollArea(dialog)
+                scroll.setWidgetResizable(False)
+                image_label = QLabel()
+                image_label.setAlignment(_qt_value("AlignmentFlag", "AlignCenter"))
+                image_label.setMovie(movie)
+                image_label._opengeoagent_movie = movie
+                scroll.setWidget(image_label)
+                layout.addWidget(scroll)
+                movie.start()
+
+                def save_image():
+                    """Save a copy of the generated GIF file."""
+                    default_name = os.path.basename(path) or "opengeoagent-image.gif"
+                    default_path = os.path.join(os.path.expanduser("~"), default_name)
+                    selected, _selected_filter = QFileDialog.getSaveFileName(
+                        dialog,
+                        "Save Image",
+                        default_path,
+                        "Images (*.png *.jpg *.jpeg *.webp *.gif);;All Files (*)",
+                    )
+                    if not selected:
+                        return
+                    try:
+                        with open(path, "rb") as src, open(selected, "wb") as dst:
+                            dst.write(src.read())
+                    except Exception as exc:
+                        QMessageBox.warning(
+                            dialog,
+                            "OpenGeoAgent",
+                            f"Could not save image:\n\n{exc}",
+                        )
+                        return
+                    self.status_label.setText(f"Saved image to {selected}")
+                    self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+                button_layout = QHBoxLayout()
+                save_btn = QPushButton("Save Image")
+                save_btn.clicked.connect(save_image)
+                button_layout.addWidget(save_btn)
+                button_layout.addStretch(1)
+                close_btn = QPushButton("Close")
+                close_btn.clicked.connect(dialog.accept)
+                button_layout.addWidget(close_btn)
+                layout.addLayout(button_layout)
+                _exec_dialog(dialog)
+                movie.stop()
+                return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Image Preview ({pixmap.width()} x {pixmap.height()})")
+        available = _screen_for_widget(self).availableGeometry()
+        dialog.resize(
+            max(480, int(available.width() * 0.75)),
+            max(360, int(available.height() * 0.75)),
+        )
+
+        layout = QVBoxLayout(dialog)
+        scroll = QScrollArea(dialog)
+        scroll.setWidgetResizable(False)
+        image_label = QLabel()
+        image_label.setAlignment(_qt_value("AlignmentFlag", "AlignCenter"))
+        image_label.setPixmap(pixmap)
+        scroll.setWidget(image_label)
+        layout.addWidget(scroll)
+
+        def save_image():
+            """Save a copy of the generated image file."""
+            default_name = os.path.basename(path) or "opengeoagent-image.png"
+            default_path = os.path.join(os.path.expanduser("~"), default_name)
+            selected, _selected_filter = QFileDialog.getSaveFileName(
+                dialog,
+                "Save Image",
+                default_path,
+                "Images (*.png *.jpg *.jpeg *.webp *.gif);;All Files (*)",
+            )
+            if not selected:
+                return
+            try:
+                with open(path, "rb") as src, open(selected, "wb") as dst:
+                    dst.write(src.read())
+            except Exception as exc:
+                QMessageBox.warning(
+                    dialog,
+                    "OpenGeoAgent",
+                    f"Could not save image:\n\n{exc}",
+                )
+                return
+            self.status_label.setText(f"Saved image to {selected}")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+        button_layout = QHBoxLayout()
+        save_btn = QPushButton("Save Image")
+        save_btn.clicked.connect(save_image)
+        button_layout.addWidget(save_btn)
+        button_layout.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+        _exec_dialog(dialog)
+
+    def _remove_image_attachment(self, index):
+        """Remove one pending image attachment."""
+        if 0 <= index < len(self._image_attachments):
+            self._image_attachments.pop(index)
+            self._render_image_attachments()
+
+    def _clear_image_attachments(self):
+        """Clear all pending image attachments."""
+        self._image_attachments = []
+        self._render_image_attachments()
+
+    def _map_canvas_widget(self):
+        """Return the best QWidget to capture for the current QGIS map canvas."""
+        try:
+            canvas = self.iface.mapCanvas()
+        except Exception:
+            canvas = None
+        if canvas is None:
+            return None
+        try:
+            viewport = canvas.viewport()
+        except Exception:
+            viewport = None
+        return viewport or canvas
+
+    def _attach_screenshot_pixmap(self, pixmap, label):
+        """Attach a captured screenshot pixmap to the pending chat message."""
+        if pixmap is None or pixmap.isNull():
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                "Could not capture a screenshot.",
+            )
+            return
+        before = len(self._image_attachments)
+        self._add_clipboard_image(pixmap.toImage())
+        if len(self._image_attachments) > before:
+            self.status_label.setText(f"Attached {label} screenshot.")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _capture_map_canvas(self):
+        """Capture the full QGIS map canvas and attach it to the prompt."""
+        widget = self._map_canvas_widget()
+        if widget is None:
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                "No QGIS map canvas is available to capture.",
+            )
+            return
+        self._attach_screenshot_pixmap(widget.grab(), "map canvas")
+
+    def _capture_qgis_window(self):
+        """Capture the QGIS window containing this dock."""
+        window = self.window()
+        screen = _screen_for_widget(window)
+        if screen is None or window is None:
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                "No QGIS window is available to capture.",
+            )
+            return
+        pixmap = window.grab()
+        if pixmap.isNull():
+            try:
+                win_id = int(window.winId())
+            except Exception:
+                win_id = 0
+            pixmap = screen.grabWindow(win_id)
+        self._attach_screenshot_pixmap(pixmap, "QGIS window")
+
+    def _start_region_capture(self):
+        """Let the user drag a rectangular screenshot region on the map canvas."""
+        widget = self._map_canvas_widget()
+        if widget is None:
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                "No QGIS map canvas is available to capture.",
+            )
+            return
+        if self._region_capture is not None:
+            self._region_capture.stop()
+        capture = CanvasRegionCapture(widget, self)
+        capture.finished.connect(
+            lambda rect, w=widget: self._finish_region_capture(w, rect)
+        )
+        capture.cancelled.connect(self._cancel_region_capture)
+        self._region_capture = capture
+        capture.start()
+        self.status_label.setText(
+            "Drag over the map canvas to attach a screenshot region. "
+            "Press Esc to cancel."
+        )
+        self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
+
+    def _finish_region_capture(self, widget, rect):
+        """Crop the selected map canvas region and attach it to the prompt."""
+        self._region_capture = None
+        pixmap = _crop_pixmap(widget.grab(), rect)
+        if pixmap.isNull():
+            QMessageBox.information(
+                self,
+                "OpenGeoAgent",
+                "Select a larger screenshot region.",
+            )
+            self.status_label.setText("Screenshot region was too small.")
+            self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+            return
+        self._attach_screenshot_pixmap(pixmap, "map region")
+
+    def _cancel_region_capture(self):
+        """Handle cancelled regional screenshot capture."""
+        self._region_capture = None
+        self.status_label.setText("Screenshot capture cancelled.")
+        self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+
+    def _start_screen_region_capture(self):
+        """Let the user drag a screenshot region anywhere on the current screen."""
+        screen = _screen_for_widget(self.window())
+        if screen is None:
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent",
+                "No screen is available to capture.",
+            )
+            return
+        if self._screen_region_capture is not None:
+            self._screen_region_capture.close()
+            self._screen_region_capture = None
+        capture = ScreenRegionCapture(screen)
+        capture.finished.connect(self._finish_screen_region_capture)
+        capture.cancelled.connect(self._cancel_screen_region_capture)
+        self._screen_region_capture = capture
+        capture.start()
+        self.status_label.setText(
+            "Drag anywhere on the screen to attach a screenshot region. "
+            "Press Esc to cancel."
+        )
+        self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
+
+    def _finish_screen_region_capture(self, global_rect):
+        """Attach a selected desktop screenshot region to the prompt."""
+        self._screen_region_capture = None
+        window = self.window()
+        pixmap = _grab_widget_global_rect(window, global_rect)
+        if pixmap.isNull():
+            screen = _screen_for_widget(window)
+            pixmap = _grab_screen_rect(screen, global_rect)
+        self._attach_screenshot_pixmap(pixmap, "screen region")
+
+    def _cancel_screen_region_capture(self):
+        """Handle cancelled desktop screenshot region capture."""
+        if self._screen_region_capture is not None:
+            self._screen_region_capture.close()
+        self._screen_region_capture = None
+        self.status_label.setText("Screen screenshot capture cancelled.")
+        self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+
+    def _send_prompt(self):
+        """Start a chat request for the current prompt."""
+        prompt = self.prompt_input.toPlainText().strip()
+        if not prompt and not self._image_attachments:
+            return
+        if self._worker is not None:
+            QMessageBox.information(
+                self,
+                "OpenGeoAgent",
+                "A request is already running. Wait for it to finish first.",
+            )
+            return
+
+        provider = self.provider_combo.currentText()
+        self._save_model_settings()
+        _apply_environment_from_settings(self.settings)
+        if provider == "openai-codex":
+            try:
+                from ..oauth import ensure_openai_oauth_environment
+
+                ensure_openai_oauth_environment(
+                    self.settings,
+                    codex=True,
+                )
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "OpenGeoAgent",
+                    f"OpenAI OAuth is not ready:\n\n{exc}",
+                )
+                return
+
+        model_id = self.model_input.text().strip() or _default_model_for_provider(
+            provider
+        )
+        if model_id and not self.model_input.text().strip():
+            self.model_input.setText(model_id)
+        fast = self.fast_check.isChecked()
+        stream = self.stream_check.isChecked()
+        auto_approve_tools = self.auto_approve_tools_check.isChecked()
+        agent_mode = self.agent_mode_combo.currentText()
+        permission_profile = self.permission_combo.currentText()
+        if permission_profile == "Trusted auto-approve":
+            auto_approve_tools = True
+        max_tokens = _max_tokens_from_settings(self.settings)
+        image_model = _image_model_from_settings(self.settings)
+        if not prompt:
+            prompt = "Describe the attached image."
+        self._record_prompt(prompt)
+        prompt_with_context = self._build_prompt_with_context(prompt)
+        if image_model:
+            prompt_with_context = (
+                f"{prompt_with_context}\n\n"
+                "Image generation setting: when calling generate_image, use "
+                f"model={image_model} unless the user explicitly asks for a "
+                "different image model."
+            )
+        attachments = [dict(item) for item in self._image_attachments]
+        chat_payload = _build_chat_content(prompt_with_context, attachments)
+
+        display_body = None
+        if attachments:
+            plural = "s" if len(attachments) != 1 else ""
+            display_body = (
+                f"{prompt}\n\n"
+                f"[Attached image{plural} sent with this message: {len(attachments)}. "
+                "The image content is not retained in later text-only context.]"
+            )
+        self._append_message("You", prompt, markdown=False, display_body=display_body)
+        self._streaming_message_index = None
+        self._streaming_answer = ""
+        self.prompt_input.clear()
+        self._clear_image_attachments()
+        self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
+        self._start_running_status(
+            "Streaming GeoAgent" if stream else "Running GeoAgent"
+        )
+        self.send_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.cancel_job_btn.setEnabled(True)
+        self._active_job_index = self._add_job(
+            {
+                "prompt": prompt,
+                "provider": provider,
+                "model": model_id,
+                "image_model": image_model,
+                "mode": agent_mode,
+                "permission_profile": permission_profile,
+                "status": "Running",
+                "started_at": time.time(),
+                "tools": "",
+                "error": "",
+            }
+        )
+
+        self._worker = ChatWorker(
+            self.iface,
+            chat_payload,
+            provider,
+            model_id,
+            fast,
+            max_tokens,
+            auto_approve_tools,
+            stream,
+            agent_mode,
+            permission_profile,
+            self,
+        )
+        self._worker.chunk_received.connect(self._on_worker_chunk)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.start()
+
+    def _build_prompt_with_context(self, prompt):
+        """Include recent chat transcript so follow-up turns have context."""
+        if not self._messages:
+            return prompt
+
+        history_lines = []
+        for msg in self._messages[-MAX_CONTEXT_MESSAGES:]:
+            body = msg.get("body", "").strip()
+            if not body:
+                continue
+            role = "User" if msg.get("sender") == "You" else "Assistant"
+            history_lines.append(f"{role}: {body}")
+
+        if not history_lines:
+            return prompt
+
+        history = "\n\n".join(history_lines)
+        if len(history) > MAX_CONTEXT_CHARS:
+            history = history[-MAX_CONTEXT_CHARS:]
+            history = f"[Earlier history truncated]\n{history}"
+
+        return (
+            "Use the recent conversation history for context. The current user "
+            "request is the authoritative request to answer now.\n\n"
+            f"Recent conversation:\n{history}\n\n"
+            f"Current user request:\n{prompt}"
+        )
+
+    def _select_sample_prompt(self, prompt):
+        """Copy the selected sample prompt into the editor."""
+        if prompt and prompt != "Sample prompts...":
+            self.prompt_input.setPlainText(prompt)
+            self.prompt_input.setFocus()
+
+    def _record_prompt(self, prompt):
+        """Store a submitted prompt in history."""
+        if not self._prompt_history or self._prompt_history[-1] != prompt:
+            self._prompt_history.append(prompt)
+        self._history_index = None
+
+    def _previous_prompt(self):
+        """Load the previous prompt from history."""
+        if not self._prompt_history:
+            return
+        if self._history_index is None:
+            self._history_index = len(self._prompt_history) - 1
+        else:
+            self._history_index = (self._history_index - 1) % len(self._prompt_history)
+        self._set_prompt_from_history()
+
+    def _next_prompt(self):
+        """Load the next prompt from history."""
+        if not self._prompt_history:
+            return
+        if self._history_index is None:
+            self._history_index = 0
+        else:
+            self._history_index = (self._history_index + 1) % len(self._prompt_history)
+        self._set_prompt_from_history()
+
+    def _set_prompt_from_history(self):
+        """Set prompt from history."""
+        self.prompt_input.setPlainText(self._prompt_history[self._history_index])
+        self.prompt_input.setFocus()
+
+    def _toggle_voice_recording(self):
+        """Start or stop recording a voice prompt."""
+        if self._voice_stopping:
+            return
+        if self._voice_recorder is not None:
+            self._stop_voice_recording()
+            return
+        self._start_voice_recording()
+
+    def _voice_shortcut_text(self):
+        """Return the configured shortcut text for toggling voice input."""
+        return (
+            _setting(
+                self.settings,
+                VOICE_SHORTCUT_SETTING,
+                DEFAULT_VOICE_SHORTCUT,
+                str,
+            ).strip()
+            or DEFAULT_VOICE_SHORTCUT
+        )
+
+    def _configure_voice_shortcut(self):
+        """Refresh voice shortcut tooltip/logging.
+
+        The shortcut itself is handled in keyPressEvent methods to avoid
+        registering QShortcut/QAction objects that can collide with QGIS.
+        """
+        shortcut_text = self._voice_shortcut_text()
+        if hasattr(self, "prompt_input"):
+            self.prompt_input.set_voice_shortcut_text(shortcut_text)
+        if not shortcut_text:
+            self._update_voice_tooltip("")
+            return
+        sequence = QKeySequence(shortcut_text)
+        if sequence.isEmpty():
+            self._update_voice_tooltip("")
+            return
+        self._update_voice_tooltip(shortcut_text)
+        QgsMessageLog.logMessage(
+            f"Voice input shortcut set to {shortcut_text}",
+            "OpenGeoAgent",
+            Qgis.MessageLevel.Info,
+        )
+
+    def _update_voice_tooltip(self, shortcut_text=None):
+        """Refresh the voice button tooltip with the current shortcut."""
+        if shortcut_text is None:
+            shortcut_text = self._voice_shortcut_text()
+        suffix = f" Shortcut: {shortcut_text}." if shortcut_text else ""
+        self.voice_btn.setToolTip(
+            "Record speech, transcribe it with the OpenAI transcription API, "
+            f"and insert the text into the prompt editor.{suffix}"
+        )
+
+    def _start_voice_recording(self):
+        """Record microphone audio to a temporary file."""
+        if self._voice_worker is not None:
+            QMessageBox.information(
+                self,
+                "OpenGeoAgent",
+                "Voice transcription is already running.",
+            )
+            self.voice_btn.setChecked(False)
+            return
+
+        if not self._voice_transcription_api_key():
+            self.voice_btn.setChecked(False)
+            QMessageBox.warning(
+                self,
+                "OpenGeoAgent Voice Input",
+                "Voice transcription uses the OpenAI transcription API and may "
+                "incur API costs.\n\nAdd an OpenAI API key in OpenGeoAgent "
+                "Settings > Model, or set OPENAI_API_KEY, before using voice input.",
+            )
+            return
+
+        if not self._confirm_voice_transcription_notice():
+            return
+
+        fd, audio_path = tempfile.mkstemp(prefix="open_geoagent_voice_", suffix=".wav")
+        os.close(fd)
+        try:
+            recorder = self._create_voice_recorder(audio_path)
+            recorder.level_changed.connect(self._update_voice_level)
+            recorder.limit_reached.connect(self._on_voice_limit_reached)
+            recorder.record()
+        except Exception as exc:
+            self._remove_temp_audio(audio_path)
+            self.voice_btn.setChecked(False)
+            QMessageBox.critical(
+                self,
+                "Voice Input Unavailable",
+                f"Could not start microphone recording:\n\n{exc}",
+            )
+            return
+
+        self._voice_audio_path = audio_path
+        self._voice_recorder = recorder
+        self._voice_recorder_refs = [recorder]
+        self._voice_stopping = False
+        self.voice_btn.setChecked(True)
+        self.voice_btn.setToolTip("Stop recording and transcribe the voice prompt.")
+        self._set_voice_level_recording()
+        self.status_label.setText("Recording voice prompt...")
+        self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
+
+    def _voice_transcription_api_key(self):
+        """Return the configured OpenAI API key for voice transcription, if any."""
+        _apply_environment_from_settings(self.settings)
+        return os.environ.get("OPENAI_API_KEY", "").strip()
+
+    def _confirm_voice_transcription_notice(self):
+        """Show the one-time OpenAI transcription cost notice."""
+        acknowledged = _setting(
+            self.settings,
+            "voice_transcription_notice_acknowledged",
+            False,
+            bool,
+        )
+        if acknowledged:
+            return True
+        response = QMessageBox.question(
+            self,
+            "OpenGeoAgent Voice Input",
+            "Voice input sends recorded audio to the OpenAI transcription API. "
+            "This can incur OpenAI API costs.\n\nContinue?",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Ok:
+            self.voice_btn.setChecked(False)
+            return False
+        self.settings.setValue(
+            f"{SETTINGS_PREFIX}voice_transcription_notice_acknowledged", True
+        )
+        return True
+
+    def _create_voice_recorder(self, audio_path):
+        """Create a direct PCM voice recorder for the active Qt binding."""
+        return VoicePromptRecorder(audio_path, self)
+
+    def _voice_level_stylesheet(self, chunk_color):
+        """Return the microphone indicator stylesheet for the current state."""
+        return (
+            "QProgressBar { border: 1px solid #b0bec5; border-radius: 3px; "
+            "background: #eceff1; } "
+            f"QProgressBar::chunk {{ background-color: {chunk_color}; "
+            "border-radius: 2px; }"
+        )
+
+    def _set_voice_level_recording(self):
+        """Show the live microphone input level indicator."""
+        if not hasattr(self, "voice_level"):
+            return
+        self.voice_level.setRange(0, 100)
+        self.voice_level.setValue(0)
+        self.voice_level.setToolTip("Live microphone input level.")
+        self.voice_level.setStyleSheet(self._voice_level_stylesheet("#1976D2"))
+        self.voice_level.setVisible(True)
+
+    def _set_voice_level_transcribing(self):
+        """Show a distinct indicator while the recorded prompt is transcribed."""
+        if not hasattr(self, "voice_level"):
+            return
+        self.voice_level.setRange(0, 100)
+        self.voice_level.setValue(100)
+        self.voice_level.setToolTip("Transcribing recorded voice prompt.")
+        self.voice_level.setStyleSheet(self._voice_level_stylesheet("#F9A825"))
+        self.voice_level.setVisible(True)
+
+    def _set_voice_level_idle(self):
+        """Hide and reset the microphone input level indicator."""
+        if not hasattr(self, "voice_level"):
+            return
+        self.voice_level.setRange(0, 100)
+        self.voice_level.setValue(0)
+        self.voice_level.setToolTip("Live microphone input level.")
+        self.voice_level.setStyleSheet(self._voice_level_stylesheet("#1976D2"))
+        self.voice_level.setVisible(False)
+
+    def _update_voice_level(self, level):
+        """Update the live microphone input level indicator."""
+        if hasattr(self, "voice_level"):
+            self.voice_level.setValue(max(0, min(100, int(level or 0))))
+
+    def _on_voice_limit_reached(self):
+        """Stop voice recording when the maximum length is reached."""
+        if self._voice_recorder is None:
+            return
+        QgsMessageLog.logMessage(
+            "Voice recording stopped after reaching the "
+            f"{VoicePromptRecorder.MAX_RECORDING_SECONDS}-second limit.",
+            "OpenGeoAgent",
+            Qgis.MessageLevel.Warning,
+        )
+        self.iface.messageBar().pushWarning(
+            "OpenGeoAgent",
+            "Voice recording reached the maximum length and was stopped "
+            "automatically.",
+        )
+        self._stop_voice_recording()
+
+    def _stop_voice_recording(self):
+        """Stop recording and begin transcription."""
+        recorder = self._voice_recorder
+        if recorder is None:
+            return
+        self._voice_stopping = True
+        try:
+            recorder.stop()
+        except Exception as exc:
+            self._voice_stopping = False
+            self._voice_recorder = None
+            self._voice_recorder_refs = []
+            self._reset_voice_button()
+            QMessageBox.critical(
+                self,
+                "Voice Input Failed",
+                f"Could not stop microphone recording:\n\n{exc}",
+            )
+            return
+
+        self.voice_btn.setEnabled(False)
+        self.voice_btn.setChecked(False)
+        self._set_voice_level_transcribing()
+        self.status_label.setText("Transcribing voice prompt...")
+        self.status_label.setStyleSheet("color: #1976D2; font-size: 10px;")
+        QTimer.singleShot(100, self._finish_voice_recording)
+
+    def _finish_voice_recording(self):
+        """Release the recorder and transcribe the recorded audio file."""
+        audio_path = self._voice_audio_path
+        recorder = self._voice_recorder
+        self._voice_recorder = None
+        self._voice_recorder_refs = []
+        self._voice_stopping = False
+        if recorder is not None:
+            recorder.deleteLater()
+
+        if not audio_path or not os.path.exists(audio_path):
+            self._reset_voice_button()
+            QMessageBox.critical(
+                self,
+                "Voice Input Failed",
+                "No recorded audio file was created.",
+            )
+            return
+
+        if os.path.getsize(audio_path) <= 0:
+            self._remove_temp_audio(audio_path)
+            self._voice_audio_path = ""
+            self._reset_voice_button()
+            QMessageBox.critical(
+                self,
+                "Voice Input Failed",
+                "The recorded audio file is empty.",
+            )
+            return
+
+        self._voice_worker = VoiceTranscriptionWorker(audio_path, self.settings, self)
+        self._voice_worker.finished.connect(self._on_voice_transcription_finished)
+        self._voice_worker.start()
+
+    def _on_voice_transcription_finished(self, result):
+        """Insert transcribed voice text into the prompt editor."""
+        audio_path = self._voice_audio_path
+        self._remove_temp_audio(audio_path)
+        self._voice_audio_path = ""
+        if self._voice_worker is not None:
+            self._voice_worker.deleteLater()
+            self._voice_worker = None
+        self._reset_voice_button()
+
+        if result.get("success"):
+            self._insert_transcribed_prompt(result.get("text", ""))
+            self.status_label.setText("Voice prompt transcribed.")
+            self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+            return
+
+        error = str(result.get("error") or "Unknown transcription error")
+        error = error.split("\n\nTraceback", 1)[0]
+        self.status_label.setText("Voice transcription failed.")
+        self.status_label.setStyleSheet("color: red; font-size: 10px;")
+        QMessageBox.critical(
+            self,
+            "Voice Transcription Failed",
+            error,
+        )
+
+    def _insert_transcribed_prompt(self, text):
+        """Insert transcribed text at the prompt cursor and move it to the end."""
+        text = str(text or "").strip()
+        if not text:
+            return
+        current = self.prompt_input.toPlainText()
+        if not current:
+            self.prompt_input.setPlainText(text)
+            self._move_prompt_cursor_to_end()
+            return
+
+        cursor = self.prompt_input.textCursor()
+        if cursor.hasSelection():
+            cursor.insertText(text)
+        else:
+            position = cursor.position()
+            before = current[:position]
+            after = current[position:]
+            prefix = "" if not before or before[-1].isspace() else " "
+            suffix = "" if not after or after[:1].isspace() else " "
+            cursor.insertText(f"{prefix}{text}{suffix}")
+        self.prompt_input.setTextCursor(cursor)
+        self._move_prompt_cursor_to_end()
+
+    def _move_prompt_cursor_to_end(self):
+        """Move the prompt editor cursor to the end of its text."""
+        end_cursor = getattr(getattr(QTextCursor, "MoveOperation", QTextCursor), "End")
+        self.prompt_input.moveCursor(end_cursor)
+        self.prompt_input.setFocus()
+
+    def _reset_voice_button(self):
+        """Restore the voice button to its idle state."""
+        self.voice_btn.setEnabled(True)
+        self.voice_btn.setChecked(False)
+        self._update_voice_tooltip()
+        self._set_voice_level_idle()
+
+    def _remove_temp_audio(self, audio_path):
+        """Remove a temporary audio file if it still exists."""
+        if not audio_path:
+            return
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+        except OSError as exc:
+            QgsMessageLog.logMessage(
+                f"Failed to remove temporary voice recording: {exc}",
+                "OpenGeoAgent",
+                Qgis.MessageLevel.Warning,
+            )
+
+    def _on_worker_finished(self, result):
+        """Render the completed chat worker result."""
+        self._stop_running_status()
+        if self._stream_render_timer.isActive():
+            self._stream_render_timer.stop()
+        if result.get("cancelled_by_user"):
+            self._append_message("OpenGeoAgent", "Cancelled by user.", markdown=False)
+            self.status_label.setText("Cancelled")
+            self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+            self._finish_active_job("Cancelled", result)
+        elif result.get("success"):
+            output_images = _prepare_output_images(result.get("images") or [])
+            answer = result.get("answer") or (
+                "(Image output.)" if output_images else "(No text response.)"
+            )
+            details = []
+            tool_calls = result.get("tool_calls") or []
+            snippet = _latest_executable_snippet(tool_calls)
+            if snippet:
+                self._last_script_snippet = snippet
+                self.copy_script_btn.setEnabled(True)
+            tool_inputs = _format_tool_calls(tool_calls)
+            if tool_inputs:
+                details.append(tool_inputs)
+            if result.get("tools"):
+                details.append(f"Tools: {result['tools']}")
+            if result.get("elapsed"):
+                details.append(f"Elapsed: {result['elapsed']}")
+            if details:
+                answer = f"{answer}\n\n" + "\n".join(details)
+            output_images = _dedupe_output_images(
+                output_images
+                + _prepare_output_images(_images_from_output_text(answer))
+                + _prepare_output_images(
+                    _images_from_trusted_tool_output_text(answer, tool_calls)
+                )
+            )
+            if result.get("streamed") and self._streaming_message_index is not None:
+                self._update_message(
+                    self._streaming_message_index,
+                    answer,
+                    markdown=True,
+                    images=output_images,
+                )
+            else:
+                self._append_message(
+                    "OpenGeoAgent",
+                    answer,
+                    markdown=True,
+                    images=output_images,
+                )
+            self.status_label.setText("Ready")
+            self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+            self._finish_active_job("Succeeded", result)
+        else:
+            error = result.get("error") or "Unknown error"
+            cancelled = result.get("cancelled")
+            if cancelled:
+                error = f"{error}\nCancelled tools: {cancelled}"
+            self._append_message("OpenGeoAgent", f"Error:\n{error}", markdown=False)
+            self.status_label.setText("Error")
+            self.status_label.setStyleSheet("color: red; font-size: 10px;")
+            self._finish_active_job("Failed", result)
+
+        self.send_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.cancel_job_btn.setEnabled(False)
+        self._worker = None
+        self._streaming_message_index = None
+        self._streaming_answer = ""
+        self._active_job_index = None
+
+    def _on_worker_chunk(self, chunk):
+        """Buffer a streamed model text chunk and schedule a debounced render."""
+        if not chunk:
+            return
+        if self._streaming_message_index is None:
+            self._streaming_message_index = len(self._messages)
+            self._messages.append(
+                {"sender": "OpenGeoAgent", "body": "", "markdown": True}
+            )
+            self.copy_md_btn.setEnabled(True)
+        self._streaming_answer += chunk
+        if not self._stream_render_timer.isActive():
+            self._stream_render_timer.start()
+
+    def _flush_streaming_render(self):
+        """Render the latest buffered streaming answer."""
+        if self._streaming_message_index is None:
+            return
+        self._update_message(
+            self._streaming_message_index,
+            self._streaming_answer,
+            markdown=True,
+        )
+
+    def _cancel_running_task(self):
+        """Request cancellation of the in-flight chat worker."""
+        worker = self._worker
+        if worker is None:
+            return
+        worker.requestInterruption()
+        self.cancel_btn.setEnabled(False)
+        self.cancel_job_btn.setEnabled(False)
+        self.status_label.setText(
+            "Cancellation requested. Waiting for the current model "
+            "call or tool to finish before stopping."
+        )
+        self.status_label.setStyleSheet("color: #EF6C00; font-size: 10px;")
+        self._start_running_status("Cancelling GeoAgent")
+
+    def _start_running_status(self, base_text):
+        """Start or update the animated status text."""
+        self._status_base_text = base_text
+        if self._status_started_at is None:
+            self._status_started_at = time.monotonic()
+            self._status_frame = 0
+        if not self._status_timer.isActive():
+            self._status_timer.start()
+        self._update_running_status()
+
+    def _stop_running_status(self):
+        """Stop the animated status text."""
+        if self._status_timer.isActive():
+            self._status_timer.stop()
+        self._status_started_at = None
+        self._status_frame = 0
+
+    def _update_running_status(self):
+        """Refresh the animated status text."""
+        if self._status_started_at is None:
+            return
+        elapsed = int(time.monotonic() - self._status_started_at)
+        spinner = ("-", "\\", "|", "/")[self._status_frame % 4]
+        self._status_frame += 1
+        dots = "." * (self._status_frame % 4)
+        if elapsed >= 30:
+            suffix = "large QGIS operations can take a while"
+        elif elapsed >= 10:
+            suffix = "running tools and waiting for the model"
+        else:
+            suffix = "working"
+        self.status_label.setText(
+            f"{spinner} {self._status_base_text}{dots} {elapsed}s - {suffix}"
+        )
+
+    def _append_message(
+        self, sender, message, markdown=False, display_body=None, images=None
+    ):
+        """Append a chat message and refresh the transcript.
+
+        ``body`` holds the canonical prompt or response text used for context
+        building. ``display_body`` optionally overrides what is shown in the
+        UI and copied transcripts so that ephemeral metadata (such as image
+        attachment markers) does not bleed into later conversation history.
+        """
+        body = str(message or "").strip()
+        entry = {"sender": sender, "body": body, "markdown": markdown}
+        if display_body is not None:
+            entry["display_body"] = display_body.strip()
+        if images:
+            entry["images"] = images
+        self._messages.append(entry)
+        self.copy_md_btn.setEnabled(bool(self._messages))
+        self._render_transcript()
+        self._save_project_history()
+
+    def _update_message(self, index, message, markdown=False, images=None):
+        """Update an existing chat message and refresh the transcript."""
+        if index < 0 or index >= len(self._messages):
+            return
+        self._messages[index]["body"] = str(message or "")
+        self._messages[index]["markdown"] = markdown
+        if images is not None:
+            if images:
+                self._messages[index]["images"] = images
+            else:
+                self._messages[index].pop("images", None)
+        self.copy_md_btn.setEnabled(bool(self._messages))
+        self._render_transcript()
+        self._save_project_history()
+
+    def _render_transcript(self):
+        """Render the stored chat messages as HTML."""
+        blocks = []
+        image_links = {}
+        image_index = 0
+        for msg in self._messages:
+            sender = html.escape(msg["sender"])
+            display = msg.get("display_body") or msg["body"]
+            if msg["markdown"]:
+                body = _markdown_to_basic_html(display)
+            else:
+                body = f"<p>{_plain_text_to_html(display)}</p>"
+            images = []
+            for image in msg.get("images") or []:
+                if not isinstance(image, dict):
+                    continue
+                href = f"opengeoagent-image:{image_index}"
+                linked = dict(image)
+                linked["_href"] = href
+                image_links[href] = linked
+                image_index += 1
+                images.append(linked)
+            image_html = _message_images_html(images)
+            if image_html:
+                body = f"{body}\n{image_html}"
+            blocks.append(
+                "<div style='margin-bottom: 12px;'>"
+                f"<p style='font-weight: 600; margin-bottom: 4px;'>{sender}</p>"
+                f"{body}"
+                "</div>"
+            )
+        self._transcript_image_links = image_links
+        blocks.append("<div style='height: 1em;'>&nbsp;</div>")
+        self.transcript.setHtml("\n".join(blocks))
+        end_cursor = getattr(getattr(QTextCursor, "MoveOperation", QTextCursor), "End")
+        self.transcript.moveCursor(end_cursor)
+
+    def _on_transcript_anchor_clicked(self, url):
+        """Open generated image thumbnails in a full-size preview dialog."""
+        href = url.toString() if hasattr(url, "toString") else str(url)
+        image = self._transcript_image_links.get(href)
+        if image is None:
+            return
+        self._preview_output_image(image)
+
+    def _copy_transcript_markdown(self):
+        """Copy the full chat transcript to the clipboard as Markdown."""
+        transcript = _conversation_markdown(self._messages)
+        if not transcript:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(transcript)
+            self.status_label.setText("Copied chat history as Markdown.")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _copy_last_script_snippet(self):
+        """Copy the most recent executable script/snippet to the clipboard."""
+        script = _copy_ready_snippet(self._last_script_snippet)
+        if not script:
+            self.status_label.setText("No executable script is available to copy.")
+            self.status_label.setStyleSheet("color: gray; font-size: 10px;")
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(script)
+            kind = self._last_script_snippet.get("kind", "script")
+            self.status_label.setText(f"Copied {kind} script.")
+            self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _export_transcript_markdown(self):
+        """Save the chat transcript as Markdown."""
+        transcript = _conversation_markdown(self._messages)
+        if not transcript:
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Chat Transcript",
+            "open_geoagent_chat.md",
+            "Markdown (*.md);;Text (*.txt)",
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(transcript)
+        self.status_label.setText("Exported chat transcript.")
+        self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _import_transcript_markdown(self):
+        """Import a Markdown transcript into the current project history."""
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Chat Transcript",
+            "",
+            "Markdown (*.md);;Text (*.txt);;All files (*)",
+        )
+        if not path:
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            messages = _parse_markdown_transcript(f.read())
+        if not messages:
+            QMessageBox.information(self, "OpenGeoAgent", "No chat messages found.")
+            return
+        self._messages = messages
+        self.copy_md_btn.setEnabled(True)
+        self._render_transcript()
+        self._save_project_history()
+        self.status_label.setText("Imported chat transcript.")
+        self.status_label.setStyleSheet("color: green; font-size: 10px;")
+
+    def _clear_transcript(self):
+        """Clear all rendered chat messages."""
+        self._messages = []
+        self._last_script_snippet = {}
+        self.copy_script_btn.setEnabled(False)
+        self.copy_md_btn.setEnabled(False)
+        self.transcript.clear()
+        self._save_project_history()
+
+    def _load_project_history(self):
+        """Load persisted chat messages for the current QGIS project."""
+        if not self._history_key:
+            return
+        raw = self.settings.value(self._history_key, "", type=str)
+        if not raw:
+            return
+        try:
+            messages = json.loads(raw)
+        except (TypeError, ValueError):
+            return
+        if not isinstance(messages, list):
+            return
+        self._messages = [
+            item
+            for item in messages
+            if isinstance(item, dict)
+            and item.get("sender")
+            and (item.get("body") or item.get("images"))
+        ]
+        self.copy_md_btn.setEnabled(bool(self._messages))
+        self._render_transcript()
+
+    def _save_project_history(self):
+        """Persist chat messages for the current QGIS project."""
+        if not self._history_key:
+            return
+        try:
+            payload = json.dumps(self._messages[-80:])
+            self.settings.setValue(self._history_key, payload)
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"Failed to persist chat history: {exc}",
+                "OpenGeoAgent",
+                Qgis.MessageLevel.Warning,
+            )
+
+    def _add_job(self, job):
+        """Record a submitted chat job and refresh the jobs table."""
+        self._jobs.append(dict(job))
+        self._render_jobs()
+        return len(self._jobs) - 1
+
+    def _finish_active_job(self, status, result):
+        """Attach final status details to the active job."""
+        if self._active_job_index is None:
+            return
+        if self._active_job_index < 0 or self._active_job_index >= len(self._jobs):
+            return
+        job = self._jobs[self._active_job_index]
+        job["status"] = status
+        job["elapsed"] = result.get("elapsed", "")
+        job["tools"] = result.get("tools", "")
+        job["tool_calls"] = result.get("tool_calls", [])
+        job["error"] = result.get("error", "")
+        self._render_jobs()
+
+    def _render_jobs(self):
+        """Refresh the compact jobs table."""
+        self.jobs_table.setRowCount(len(self._jobs))
+        for row, job in enumerate(self._jobs):
+            values = [
+                job.get("status", ""),
+                job.get("mode", ""),
+                job.get("prompt", ""),
+                _job_status_text(job),
+            ]
+            for col, value in enumerate(values):
+                self.jobs_table.setItem(row, col, QTableWidgetItem(str(value)))
+        if self._jobs:
+            self.jobs_table.scrollToBottom()
+            self.jobs_table.selectRow(len(self._jobs) - 1)
+
+    def _selected_job_index(self):
+        """Return the selected job row or None."""
+        ranges = self.jobs_table.selectedRanges()
+        if not ranges:
+            return None
+        row = ranges[0].topRow()
+        if row < 0 or row >= len(self._jobs):
+            return None
+        return row
+
+    def _rerun_selected_job(self):
+        """Copy a completed job prompt/settings back into the controls and send it."""
+        index = self._selected_job_index()
+        if index is None:
+            return
+        job = self._jobs[index]
+        self.prompt_input.setPlainText(job.get("prompt", ""))
+        for combo, key in (
+            (self.provider_combo, "provider"),
+            (self.agent_mode_combo, "mode"),
+            (self.permission_combo, "permission_profile"),
+        ):
+            value = job.get(key, "")
+            found = combo.findText(value)
+            if found >= 0:
+                combo.setCurrentIndex(found)
+        model = job.get("model", "")
+        if model:
+            self.model_input.setText(model)
+        self._send_prompt()
+
+    def _shutdown_running_state(self):
+        """Stop the animated status timer when the dock is dismissed."""
+        try:
+            self._stop_running_status()
+            if self._region_capture is not None:
+                self._region_capture.stop()
+                self._region_capture = None
+            if self._screen_region_capture is not None:
+                self._screen_region_capture.close()
+                self._screen_region_capture = None
+            if self._voice_recorder is not None:
+                recorder = self._voice_recorder
+                try:
+                    recorder.stop()
+                except Exception as exc:
+                    QgsMessageLog.logMessage(
+                        f"Failed to stop voice recorder during dock shutdown: {exc}",
+                        "OpenGeoAgent",
+                        Qgis.MessageLevel.Warning,
+                    )
+                finally:
+                    self._voice_recorder = None
+                    self._voice_recorder_refs = []
+                    recorder.deleteLater()
+            if self._voice_worker is not None:
+                worker = self._voice_worker
+                try:
+                    worker.finished.disconnect(self._on_voice_transcription_finished)
+                except (TypeError, RuntimeError):
+                    pass
+                if worker.isRunning():
+                    # Block briefly so the OpenAI request can finish writing or
+                    # release the temp WAV file before we delete it. Avoids
+                    # tearing down the QThread mid-request.
+                    worker.wait(5000)
+                worker.deleteLater()
+                self._voice_worker = None
+            self._remove_temp_audio(self._voice_audio_path)
+            self._voice_audio_path = ""
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"Failed to stop running status timer during dock shutdown: {exc}",
+                "OpenGeoAgent",
+                Qgis.MessageLevel.Warning,
+            )
+
+    def hideEvent(self, event):
+        """Stop the animated status timer when the dock is hidden."""
+        self._shutdown_running_state()
+        super().hideEvent(event)
+
+    def keyPressEvent(self, event):
+        """Handle chat dock keyboard shortcuts."""
+        if _event_matches_key_sequence(event, self._voice_shortcut_text()):
+            self._toggle_voice_recording()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        """Refresh shortcut tooltip when the dock is shown."""
+        self._configure_voice_shortcut()
+        super().showEvent(event)
+
+    def closeEvent(self, event):
+        """Stop the animated status timer when the dock is closed."""
+        self._shutdown_running_state()
+        super().closeEvent(event)

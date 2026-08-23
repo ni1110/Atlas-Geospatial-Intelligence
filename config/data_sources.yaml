@@ -1,0 +1,26 @@
+administrative_boundary:
+  priority: [geoboundaries, local_geoboundaries]
+  dataset_version: current
+dem:
+  priority: [copernicus_glo30, valid_cache]
+  dataset_version: 2023_1
+water:
+  priority: [jrc_gsw, osm_overpass, valid_cache]
+  dataset_version: 1984-2024
+land_cover:
+  priority: [esa_worldcover, valid_cache]
+  dataset_version: 2021_v200
+protected_areas:
+  priority: [local_wdpa, osm_overpass, valid_cache]
+power_infrastructure:
+  priority: [osm_overpass, local_osm, valid_cache]
+roads:
+  priority: [osm_overpass, local_osm, valid_cache]
+energy_resource:
+  priority: [nasa_power, valid_cache]
+sentinel:
+  priority: [copernicus_dataspace_stac, planetary_computer_stac, valid_cache]
+network:
+  user_agent: Atlas-Geospatial-Intelligence/1.0
+  timeout_seconds: 30
+  max_materialized_pixels: 50000000

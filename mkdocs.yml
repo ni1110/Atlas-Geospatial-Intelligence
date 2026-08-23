@@ -1,0 +1,37 @@
+site_name: Atlas
+site_description: Atlas——地理空间分析与新能源选址 Agent
+site_author: Atlas Contributors
+repo_url: https://github.com/ni1110/Atlas-Geospatial-Intelligence
+repo_name: ni1110/Atlas-Geospatial-Intelligence
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.instant
+    - navigation.top
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - 项目首页: index.md
+  - 快速开始: getting-started.md
+  - 系统架构: architecture.md
+  - 执行流程: workflow.md
+  - 设计说明: design.md
+  - 验证边界: validation.md

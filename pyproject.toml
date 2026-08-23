@@ -1,0 +1,139 @@
+[project]
+name = "atlas-geospatial-intelligence"
+version = "1.8.2"
+description = "Atlas: hierarchical multi-agent geospatial analysis and renewable-site intelligence"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = [
+    "Atlas",
+    "geospatial",
+    "AI",
+    "agent",
+    "STAC",
+    "remote sensing",
+    "earth observation",
+    "QGIS",
+    "leafmap",
+    "anymap",
+    "strands-agents",
+]
+license = "MIT"
+authors = [{ name = "Atlas Contributors" }]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "strands-agents>=1.37",
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+    "mcp>=1.25,<2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "shapely>=2.0",
+    "pyproj>=3.7",
+    "numpy>=2.0",
+    "rasterio>=1.4",
+    "Pillow>=10.0",
+    "opentelemetry-api>=1.30",
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+]
+
+[project.entry-points."console_scripts"]
+geoagent = "geoagent.cli:main"
+renewable-site-agent = "renewable_site_agent.cli:main"
+renewable-site-api = "renewable_site_agent.api:main"
+renewable-site-worker = "renewable_site_agent.durable.worker:main"
+renewable-site-eval = "evals.run_evals:main"
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+zhipu = ["openai>=1.0"]
+anthropic = ["anthropic>=0.40"]
+gemini = ["strands-agents[gemini]>=1.37", "google-genai>=1.0"]
+ollama = ["ollama>=0.3"]
+litellm = ["strands-agents[litellm]>=1.37"]
+openrouter = ["openai>=1.0"]
+vllm = ["strands-vllm"]
+bedrock = []
+leafmap = ["leafmap>=0.43"]
+anymap = ["anymap"]
+geoai = ["geoai"]
+geemap = ["geemap"]
+earthengine = ["earthengine-api>=1.0", "geemap"]
+stac = ["pystac-client>=0.8", "planetary-computer>=1.0"]
+earthdata = ["earthaccess>=0.10"]
+nasa-opera = ["earthaccess>=0.10"]
+whitebox = ["whitebox>=2.3.6"]
+hsae = ["hydrosovereign>=6.0.7"]
+ui = ["solara>=1.35", "starlette<2.0"]
+browser = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
+qgis = []
+providers = ["atlas-geospatial-intelligence[zhipu,openai,anthropic,gemini,ollama,litellm,openrouter,vllm]"]
+all = [
+    "atlas-geospatial-intelligence[providers,leafmap,anymap,geoai,geemap,earthengine,stac,earthdata,nasa-opera,whitebox,ui,browser]",
+]
+dev = [
+    "geopandas>=1.1,<2",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "pre-commit>=4.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["geoagent*", "renewable_site_agent*", "evals*"]
+exclude = ["docs*", "tests*", "examples*"]
+
+[tool.setuptools.package-data]
+renewable_site_agent = ["skills/*/SKILL.md", "reporting/templates/*.j2"]
+
+[tool.bumpversion]
+current_version = "1.8.2"
+commit = true
+tag = true
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "geoagent/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "qgis_geoagent/open_geoagent/metadata.txt"
+search = "version={current_version}"
+replace = "version={new_version}"
+
+[tool.ruff]
+line-length = 88
+exclude = ["docs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "qgis_geoagent/tests"]
+addopts = "--basetemp=temp/pytest -m 'not legacy_artifact'"
+markers = [
+    "offline: no external network or credentials",
+    "integration: local process or component integration",
+    "live: calls a real external provider",
+    "legacy_artifact: requires a specific external persisted job snapshot",
+]
+
+[project.urls]
+Homepage = "https://github.com/ni1110/Atlas-Geospatial-Intelligence"
+Repository = "https://github.com/ni1110/Atlas-Geospatial-Intelligence"
+Documentation = "https://github.com/ni1110/Atlas-Geospatial-Intelligence/tree/main/docs"
+Issues = "https://github.com/ni1110/Atlas-Geospatial-Intelligence/issues"
+
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"

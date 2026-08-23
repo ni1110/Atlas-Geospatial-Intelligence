@@ -1,0 +1,28 @@
+framework: strands
+router:
+  temperature: 0.0
+  max_attempts: 2
+parser:
+  temperature: 0.0
+  max_attempts: 2
+planner:
+  temperature: 0.0
+  max_attempts: 2
+explanation:
+  temperature: 0.2
+provider_env:
+  provider: GEOAGENT_MODEL_PROVIDER
+  model: GEOAGENT_MODEL_ID
+  base_url: GEOAGENT_MODEL_BASE_URL
+  api_key: GEOAGENT_MODEL_API_KEY
+zhipu:
+  provider: zhipu
+  api_key_env: ZHIPUAI_API_KEY
+  api_key_aliases: [ZAI_API_KEY, GEOAGENT_MODEL_API_KEY]
+  model_env: ZHIPUAI_MODEL
+  default_model: glm-4.5-flash
+  base_url_env: ZHIPUAI_BASE_URL
+  default_base_url: https://open.bigmodel.cn/api/paas/v4/
+vlm:
+  local_model_path: ${PROJECT_ROOT}/models/Qwen2.5-VL-7B-Instruct
+  optional: true

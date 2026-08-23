@@ -1,0 +1,33 @@
+name: Public CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ATLAS_REQUIRE_D_DRIVE: "0"
+      GEOAGENT_MODEL_PROVIDER: deterministic
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project and documentation tools
+        run: >-
+          python -m pip install -e ".[dev,zhipu]"
+          mkdocs mkdocs-material pymdown-extensions
+      - name: Run offline public smoke tests
+        run: python -m pytest tests/test_public_smoke.py -q
+      - name: Compile orchestration packages
+        run: python -m compileall -q geoagent/orchestration renewable_site_agent
+      - name: Build documentation
+        run: python -m mkdocs build --strict

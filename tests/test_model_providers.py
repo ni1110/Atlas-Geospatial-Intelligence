@@ -1,0 +1,509 @@
+"""Tests for model provider configuration and resolution."""
+
+from __future__ import annotations
+
+import sys
+import types
+
+import pytest
+
+from geoagent.core.config import GeoAgentConfig
+from geoagent.core.model import resolve_model
+
+
+def _install_fake_openai_responses_model(monkeypatch):
+    """Install a fake Strands OpenAI Responses module."""
+
+    class FakeOpenAIResponsesModel:
+        """Capture OpenAI Responses constructor arguments."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    module = types.ModuleType("strands.models.openai_responses")
+    module.OpenAIResponsesModel = FakeOpenAIResponsesModel
+    monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
+    monkeypatch.setitem(
+        sys.modules,
+        "strands.models",
+        types.ModuleType("strands.models"),
+    )
+    monkeypatch.setitem(sys.modules, "strands.models.openai_responses", module)
+    return FakeOpenAIResponsesModel
+
+
+def _install_fake_openai_model(monkeypatch):
+    """Install a fake Strands OpenAI module."""
+
+    class FakeOpenAIModel:
+        """Capture OpenAI constructor arguments."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    module = types.ModuleType("strands.models.openai")
+    module.OpenAIModel = FakeOpenAIModel
+    monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
+    monkeypatch.setitem(
+        sys.modules,
+        "strands.models",
+        types.ModuleType("strands.models"),
+    )
+    monkeypatch.setitem(sys.modules, "strands.models.openai", module)
+    return FakeOpenAIModel
+
+
+def test_litellm_config_is_valid() -> None:
+    """Verify that LiteLLM is accepted as a configured provider."""
+    cfg = GeoAgentConfig(provider="litellm", model="openai/gpt-5.5")
+
+    assert cfg.provider == "litellm"
+    assert cfg.model == "openai/gpt-5.5"
+
+
+def test_zhipu_config_is_valid() -> None:
+    cfg = GeoAgentConfig(provider="zhipu", model="glm-4.5-flash")
+
+    assert cfg.provider == "zhipu"
+    assert cfg.model == "glm-4.5-flash"
+
+
+def test_openrouter_config_is_valid() -> None:
+    """Verify that OpenRouter is accepted as a configured provider."""
+    cfg = GeoAgentConfig(provider="openrouter", model="qwen/qwen3-32b")
+
+    assert cfg.provider == "openrouter"
+    assert cfg.model == "qwen/qwen3-32b"
+
+
+def test_vllm_config_is_valid() -> None:
+    """Verify that vLLM is accepted as a configured provider."""
+    cfg = GeoAgentConfig(provider="vllm", model="Qwen/Qwen3-4B")
+
+    assert cfg.provider == "vllm"
+    assert cfg.model == "Qwen/Qwen3-4B"
+
+
+def test_max_tokens_defaults_to_provider_auto() -> None:
+    """Verify default config leaves output token limits to the provider."""
+    assert GeoAgentConfig().max_tokens is None
+
+
+def test_openai_codex_config_is_valid() -> None:
+    """Verify that OpenAI Codex OAuth is accepted as a provider."""
+    cfg = GeoAgentConfig(provider="openai-codex", model="gpt-5.5")
+
+    assert cfg.provider == "openai-codex"
+    assert cfg.model == "gpt-5.5"
+
+
+def test_openai_codex_is_default_provider_without_env(monkeypatch) -> None:
+    """Verify OpenAI Codex is the default provider."""
+    for key in [
+        "ZHIPUAI_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_CODEX_ACCESS_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OLLAMA_HOST",
+        "USE_OLLAMA",
+        "LITELLM_API_KEY",
+        "LITELLM_MODEL",
+        "LITELLM_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_BASE_URL",
+        "VLLM_BASE_URL",
+        "VLLM_MODEL_ID",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+
+    assert GeoAgentConfig().provider == "openai-codex"
+
+
+def test_zhipu_can_be_selected_from_environment(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("ZHIPUAI_API_KEY", "unit-test-key")
+
+    assert GeoAgentConfig().provider == "zhipu"
+
+
+def test_resolve_zhipu_uses_strands_openai_abstraction(monkeypatch) -> None:
+    fake_model = _install_fake_openai_model(monkeypatch)
+    monkeypatch.setenv("ZHIPUAI_API_KEY", "unit-test-key")
+
+    model = resolve_model(
+        GeoAgentConfig(provider="zhipu", model="glm-4.5-flash", temperature=0.0, max_tokens=2048)
+    )
+
+    assert isinstance(model, fake_model)
+    assert model.kwargs == {
+        "client_args": {
+            "api_key": "unit-test-key",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+        },
+        "model_id": "glm-4.5-flash",
+        "params": {
+            "temperature": 0.01,
+            "extra_body": {"thinking": {"type": "disabled"}},
+            "max_tokens": 2048,
+        },
+    }
+
+
+def test_openai_codex_can_be_selected_from_environment(monkeypatch) -> None:
+    """Verify that Codex OAuth token selects OpenAI Codex by default."""
+    for key in [
+        "ZHIPUAI_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OLLAMA_HOST",
+        "USE_OLLAMA",
+        "LITELLM_API_KEY",
+        "LITELLM_MODEL",
+        "LITELLM_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_BASE_URL",
+        "VLLM_BASE_URL",
+        "VLLM_MODEL_ID",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENAI_CODEX_ACCESS_TOKEN", "codex-token")
+
+    assert GeoAgentConfig().provider == "openai-codex"
+
+
+def test_litellm_can_be_selected_from_environment(monkeypatch) -> None:
+    """Verify that LiteLLM environment variables select LiteLLM by default."""
+    for key in [
+        "ZHIPUAI_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_CODEX_ACCESS_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OLLAMA_HOST",
+        "USE_OLLAMA",
+        "VLLM_BASE_URL",
+        "VLLM_MODEL_ID",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_BASE_URL",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.test")
+
+    assert GeoAgentConfig().provider == "litellm"
+
+
+def test_openrouter_can_be_selected_from_environment(monkeypatch) -> None:
+    """Verify that OpenRouter environment variables select OpenRouter."""
+    for key in [
+        "ZHIPUAI_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_CODEX_ACCESS_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OLLAMA_HOST",
+        "USE_OLLAMA",
+        "LITELLM_API_KEY",
+        "LITELLM_MODEL",
+        "LITELLM_BASE_URL",
+        "VLLM_BASE_URL",
+        "VLLM_MODEL_ID",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    assert GeoAgentConfig().provider == "openrouter"
+
+
+def test_vllm_can_be_selected_from_environment(monkeypatch) -> None:
+    """Verify that vLLM environment variables select vLLM by default."""
+    for key in [
+        "ZHIPUAI_API_KEY",
+        "ZAI_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_CODEX_ACCESS_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OLLAMA_HOST",
+        "USE_OLLAMA",
+        "LITELLM_API_KEY",
+        "LITELLM_MODEL",
+        "LITELLM_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_BASE_URL",
+    ]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+
+    assert GeoAgentConfig().provider == "vllm"
+
+
+def test_resolve_openai_codex_model(monkeypatch) -> None:
+    """Verify OpenAI Codex resolves to the Responses model."""
+    fake_model = _install_fake_openai_responses_model(monkeypatch)
+    monkeypatch.setenv("OPENAI_CODEX_ACCESS_TOKEN", "codex-token")
+    monkeypatch.setenv("OPENAI_CODEX_ACCOUNT_ID", "account-123")
+
+    model = resolve_model(
+        GeoAgentConfig(
+            provider="openai-codex",
+            model="gpt-5.5",
+            temperature=0.1,
+            max_tokens=2048,
+        )
+    )
+
+    assert isinstance(model, fake_model)
+    assert model.kwargs == {
+        "client_args": {
+            "api_key": "codex-token",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "default_headers": {
+                "User-Agent": "codex-cli",
+                "ChatGPT-Account-Id": "account-123",
+            },
+        },
+        "model_id": "gpt-5.5",
+        "params": {},
+    }
+
+
+def test_resolve_openai_codex_uses_stored_login(monkeypatch, tmp_path) -> None:
+    """Verify stored Codex OAuth tokens are loaded for Python sessions."""
+    fake_model = _install_fake_openai_responses_model(monkeypatch)
+    token_file = tmp_path / "codex.json"
+    token_file.write_text(
+        (
+            '{"access_token": "stored-token", "account_id": "account-456", '
+            '"expires_at": 4102444800}'
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("GEOAGENT_CODEX_TOKEN_FILE", str(token_file))
+
+    model = resolve_model(GeoAgentConfig(provider="openai-codex", model="gpt-5.5"))
+
+    assert isinstance(model, fake_model)
+    assert model.kwargs["client_args"]["api_key"] == "stored-token"
+    assert (
+        model.kwargs["client_args"]["default_headers"]["ChatGPT-Account-Id"]
+        == "account-456"
+    )
+
+
+def test_openai_codex_requires_token(monkeypatch) -> None:
+    """Verify missing Codex OAuth token gives a clear error."""
+    _install_fake_openai_responses_model(monkeypatch)
+    monkeypatch.delenv("OPENAI_CODEX_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("GEOAGENT_CODEX_TOKEN_FILE", "/tmp/geoagent-missing-codex.json")
+
+    with pytest.raises(ValueError, match="ChatGPT OAuth access token"):
+        resolve_model(GeoAgentConfig(provider="openai-codex"))
+
+
+def test_resolve_gemini_auto_omits_max_output_tokens(monkeypatch) -> None:
+    """Verify Gemini auto mode leaves max output tokens to the provider."""
+
+    class FakeGeminiModel:
+        """Capture Gemini constructor arguments."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    module = types.ModuleType("strands.models.gemini")
+    module.GeminiModel = FakeGeminiModel
+    monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
+    monkeypatch.setitem(
+        sys.modules,
+        "strands.models",
+        types.ModuleType("strands.models"),
+    )
+    monkeypatch.setitem(sys.modules, "strands.models.gemini", module)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    model = resolve_model(
+        GeoAgentConfig(
+            provider="gemini",
+            model="gemini-3.1-pro-preview",
+            temperature=0,
+        )
+    )
+
+    assert isinstance(model, FakeGeminiModel)
+    assert model.kwargs == {
+        "client_args": {"api_key": "test-key"},
+        "model_id": "gemini-3.1-pro-preview",
+        "params": {"temperature": 0},
+    }
+
+
+def test_resolve_gemini_preserves_explicit_token_limit(monkeypatch) -> None:
+    """Verify explicit Gemini token limits are preserved."""
+
+    class FakeGeminiModel:
+        """Capture Gemini constructor arguments."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    module = types.ModuleType("strands.models.gemini")
+    module.GeminiModel = FakeGeminiModel
+    monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
+    monkeypatch.setitem(
+        sys.modules,
+        "strands.models",
+        types.ModuleType("strands.models"),
+    )
+    monkeypatch.setitem(sys.modules, "strands.models.gemini", module)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    model = resolve_model(
+        GeoAgentConfig(
+            provider="gemini",
+            model="gemini-3.1-pro-preview",
+            max_tokens=16384,
+        )
+    )
+
+    assert model.kwargs["params"]["max_output_tokens"] == 16384
+
+
+def test_resolve_litellm_model(monkeypatch) -> None:
+    """Verify that LiteLLM config resolves to the Strands LiteLLM model."""
+
+    class FakeLiteLLMModel:
+        """Capture LiteLLM constructor arguments."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    module = types.ModuleType("strands.models.litellm")
+    module.LiteLLMModel = FakeLiteLLMModel
+    monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
+    monkeypatch.setitem(
+        sys.modules,
+        "strands.models",
+        types.ModuleType("strands.models"),
+    )
+    monkeypatch.setitem(sys.modules, "strands.models.litellm", module)
+    monkeypatch.setenv("LITELLM_API_KEY", "test-key")
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.test")
+
+    model = resolve_model(
+        GeoAgentConfig(
+            provider="litellm",
+            model="anthropic/claude-3-7-sonnet-20250219",
+            temperature=0.2,
+            max_tokens=1024,
+        )
+    )
+
+    assert isinstance(model, FakeLiteLLMModel)
+    assert model.kwargs == {
+        "client_args": {
+            "api_key": "test-key",
+            "base_url": "https://litellm.example.test",
+        },
+        "model_id": "anthropic/claude-3-7-sonnet-20250219",
+        "params": {"temperature": 0.2, "max_tokens": 1024},
+    }
+
+
+def test_resolve_openrouter_model(monkeypatch) -> None:
+    """Verify OpenRouter resolves through the OpenAI-compatible model."""
+    fake_model = _install_fake_openai_model(monkeypatch)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://openrouter.example.test/v1")
+
+    model = resolve_model(
+        GeoAgentConfig(
+            provider="openrouter",
+            model="qwen/qwen3-32b",
+            temperature=0.2,
+            max_tokens=1024,
+        )
+    )
+
+    assert isinstance(model, fake_model)
+    assert model.kwargs == {
+        "client_args": {
+            "api_key": "test-key",
+            "base_url": "https://openrouter.example.test/v1",
+        },
+        "model_id": "qwen/qwen3-32b",
+        "params": {"temperature": 0.2, "max_tokens": 1024},
+    }
+
+
+def test_resolve_openrouter_requires_api_key(monkeypatch) -> None:
+    """Verify OpenRouter reports a clear error without an API key."""
+    _install_fake_openai_model(monkeypatch)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="OpenRouter provider requires an API key"):
+        resolve_model(GeoAgentConfig(provider="openrouter"))
+
+
+def test_resolve_vllm_model(monkeypatch) -> None:
+    """Verify that vLLM config resolves to the Strands vLLM model."""
+
+    class FakeVLLMModel:
+        """Capture vLLM constructor arguments."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    module = types.ModuleType("strands_vllm")
+    module.VLLMModel = FakeVLLMModel
+    monkeypatch.setitem(sys.modules, "strands_vllm", module)
+    monkeypatch.setenv("VLLM_API_KEY", "test-key")
+    monkeypatch.setenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+
+    model = resolve_model(
+        GeoAgentConfig(
+            provider="vllm",
+            model="Qwen/Qwen3-4B",
+            temperature=0.2,
+            max_tokens=1024,
+        )
+    )
+
+    assert isinstance(model, FakeVLLMModel)
+    assert model.kwargs == {
+        "base_url": "http://localhost:8000/v1",
+        "model_id": "Qwen/Qwen3-4B",
+        "api_key": "test-key",
+        "params": {"temperature": 0.2, "max_tokens": 1024},
+    }
+
+
+def test_resolve_vllm_requires_model_id(monkeypatch) -> None:
+    """Verify vLLM reports a clear error without a model id."""
+
+    class FakeVLLMModel:
+        """Unused fake vLLM model."""
+
+    module = types.ModuleType("strands_vllm")
+    module.VLLMModel = FakeVLLMModel
+    monkeypatch.setitem(sys.modules, "strands_vllm", module)
+    monkeypatch.delenv("VLLM_MODEL_ID", raising=False)
+
+    with pytest.raises(ValueError, match="vLLM provider requires a model id"):
+        resolve_model(GeoAgentConfig(provider="vllm"))

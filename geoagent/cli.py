@@ -1,0 +1,244 @@
+"""GeoAgent CLI.
+
+Commands:
+  geoagent serve           Launch the canonical Geo Job API and browser demo
+  geoagent ui              Launch the Solara UI
+  geoagent browser         Launch the browser WebSocket backend
+  geoagent codex login     Login with ChatGPT/Codex OAuth
+  geoagent --help          Show help
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import time
+
+
+def _run_api_server(args: argparse.Namespace) -> int:
+    """Launch the canonical general GeoAgent API."""
+    try:
+        import uvicorn
+
+        uvicorn.run("renewable_site_agent.api:app", host=args.host, port=args.port, reload=False)
+        return 0
+    except Exception as exc:
+        print(f"GeoAgent API server failed: {exc}")
+        return 1
+
+
+def _run_solara_app() -> int:
+    """Launch the Solara UI application."""
+    try:
+        from geoagent.ui import PAGES_DIR
+    except Exception as e:
+        print(f"Failed to locate UI app: {e}")
+        return 1
+
+    cmd = [sys.executable, "-m", "solara", "run", PAGES_DIR]
+    try:
+        return subprocess.call(cmd)
+    except FileNotFoundError:
+        print("Solara is not installed. Install with `pip install solara`.\n")
+        return 1
+
+
+def _run_codex_login(args: argparse.Namespace) -> int:
+    """Run the ChatGPT/Codex OAuth login flow."""
+    try:
+        from geoagent.core.openai_codex import default_token_file, login_openai_codex
+
+        login_openai_codex(
+            open_browser=not args.no_browser,
+            timeout_seconds=args.timeout,
+            token_file=args.token_file,
+        )
+        print(f"Saved Codex login to {args.token_file or default_token_file()}")
+        return 0
+    except Exception as exc:
+        print(f"Codex login failed: {exc}")
+        return 1
+
+
+def _run_browser_server(args: argparse.Namespace) -> int:
+    """Run the embedded browser GeoAgent WebSocket backend."""
+    try:
+        from geoagent.browser.server import run_browser_server
+
+        run_browser_server(
+            host=args.host,
+            port=args.port,
+            provider=args.provider,
+            model_id=args.model,
+            command_timeout_seconds=args.command_timeout,
+            allow_browser_code=args.allow_browser_code,
+            auto_approve_browser_tools=args.auto_approve_browser_tools,
+        )
+        return 0
+    except Exception as exc:
+        print(f"Browser server failed: {exc}")
+        return 1
+
+
+def _run_codex_status(args: argparse.Namespace) -> int:
+    """Print local ChatGPT/Codex OAuth status."""
+    try:
+        from geoagent.core.openai_codex import (
+            default_token_file,
+            load_token_payload,
+            token_expires_soon,
+        )
+
+        path = args.token_file or default_token_file()
+        payload = load_token_payload(token_file=path)
+    except Exception as exc:
+        print(f"Not logged in: {exc}")
+        return 1
+
+    expires_at = payload.get("expires_at")
+    status = "expires soon" if token_expires_soon(expires_at) else "valid"
+    if expires_at:
+        try:
+            expiry = time.strftime(
+                "%Y-%m-%d %H:%M:%S %Z",
+                time.localtime(float(expires_at)),
+            )
+        except (TypeError, ValueError, OverflowError):
+            print(f"Logged in ({status}); token expiry is unknown")
+        else:
+            print(f"Logged in ({status}); token expires at {expiry}")
+    else:
+        print(f"Logged in ({status}); token expiry is unknown")
+    return 0
+
+
+def _run_codex_logout(args: argparse.Namespace) -> int:
+    """Remove the local ChatGPT/Codex OAuth token file."""
+    from geoagent.core.openai_codex import clear_token_payload
+
+    clear_token_payload(token_file=args.token_file)
+    print("Removed local Codex login.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the script entry point."""
+    parser = argparse.ArgumentParser(
+        prog="geoagent",
+        description="GeoAgent command line interface",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+
+    subparsers.add_parser("ui", help="Launch the Solara UI")
+    serve_parser = subparsers.add_parser("serve", help="Launch the canonical Geo Job API and browser demo")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.set_defaults(func=_run_api_server)
+    browser_parser = subparsers.add_parser(
+        "browser",
+        help="Launch the browser WebSocket backend",
+    )
+    browser_parser.add_argument("--host", default="127.0.0.1")
+    browser_parser.add_argument("--port", type=int, default=8765)
+    browser_parser.add_argument(
+        "--provider",
+        default="openai-codex",
+        help="Model provider id. Defaults to openai-codex.",
+    )
+    browser_parser.add_argument("--model", default=None, help="Override model id")
+    browser_parser.add_argument(
+        "--command-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for browser map command results",
+    )
+    browser_parser.add_argument(
+        "--allow-browser-code",
+        action="store_true",
+        help=(
+            "Expose and auto-approve run_maplibre_script for local browser "
+            "MapLibre JavaScript execution."
+        ),
+    )
+    browser_parser.add_argument(
+        "--auto-approve-browser-tools",
+        action="store_true",
+        help=(
+            "Auto-approve confirmation-gated browser map tools such as "
+            "remove_layer and clear_layers for trusted local sessions."
+        ),
+    )
+    browser_parser.set_defaults(func=_run_browser_server)
+
+    codex_parser = subparsers.add_parser(
+        "codex",
+        help="Manage ChatGPT/Codex OAuth login",
+    )
+    codex_subparsers = codex_parser.add_subparsers(
+        dest="codex_command",
+        metavar="command",
+    )
+
+    codex_login = codex_subparsers.add_parser(
+        "login",
+        help="Login with ChatGPT/Codex OAuth",
+    )
+    codex_login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the login URL instead of opening a browser",
+    )
+    codex_login.add_argument(
+        "--timeout",
+        type=int,
+        default=180,
+        help="Seconds to wait for the browser callback",
+    )
+    codex_login.add_argument(
+        "--token-file",
+        help="Override the local token file path",
+    )
+    codex_login.set_defaults(func=_run_codex_login)
+
+    codex_status = codex_subparsers.add_parser(
+        "status",
+        help="Show local ChatGPT/Codex OAuth status",
+    )
+    codex_status.add_argument(
+        "--token-file",
+        help="Override the local token file path",
+    )
+    codex_status.set_defaults(func=_run_codex_status)
+
+    codex_logout = codex_subparsers.add_parser(
+        "logout",
+        help="Remove the local ChatGPT/Codex OAuth token",
+    )
+    codex_logout.add_argument(
+        "--token-file",
+        help="Override the local token file path",
+    )
+    codex_logout.set_defaults(func=_run_codex_logout)
+
+    args = parser.parse_args(argv)
+
+    if args.command == "ui":
+        return _run_solara_app()
+    if args.command == "serve":
+        return args.func(args)
+    if args.command == "browser":
+        return args.func(args)
+    if args.command == "codex":
+        if hasattr(args, "func"):
+            return args.func(args)
+        codex_parser.print_help()
+        return 0
+
+    # No command: show help
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

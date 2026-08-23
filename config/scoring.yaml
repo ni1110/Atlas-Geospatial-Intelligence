@@ -1,0 +1,47 @@
+weights:
+  solar:
+    slope_score: 0.24
+    energy_resource_score: 0.26
+    grid_score: 0.20
+    accessibility_score: 0.12
+    land_cover_score: 0.10
+    area_score: 0.08
+  wind:
+    slope_score: 0.12
+    energy_resource_score: 0.34
+    grid_score: 0.22
+    accessibility_score: 0.12
+    land_cover_score: 0.08
+    area_score: 0.12
+  storage:
+    slope_score: 0.18
+    energy_resource_score: 0.00
+    grid_score: 0.36
+    accessibility_score: 0.22
+    land_cover_score: 0.10
+    area_score: 0.14
+  hybrid:
+    slope_score: 0.18
+    energy_resource_score: 0.28
+    grid_score: 0.22
+    accessibility_score: 0.12
+    land_cover_score: 0.08
+    area_score: 0.12
+missing_evidence_policy: renormalize_available_weights
+distance_decay_km:
+  grid: 20
+  road: 10
+resource_score_ranges:
+  solar:
+    parameter: ALLSKY_SFC_SW_DWN
+    minimum: 2.0
+    maximum: 7.0
+    units: kWh/m2/day
+  wind:
+    parameter: WS50M
+    minimum: 2.0
+    maximum: 10.0
+    units: m/s
+area_per_mw_km2: {}
+default_top_k: 5
+max_top_k: 20
