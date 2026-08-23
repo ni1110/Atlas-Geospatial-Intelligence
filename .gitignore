@@ -45,19 +45,19 @@ secrets*.json
 secrets*.yaml
 secrets*.yml
 *token*.json
-private/
+/private/
 
 # Atlas runtime state and local data
-runtime/
-data/
-cache/
-logs/
-state/
-temp/
-models/
-downloads/
-pip/
-artifacts/
+/runtime/
+/data/
+/cache/
+/logs/
+/state/
+/temp/
+/models/
+/downloads/
+/pip/
+/artifacts/
 *.sqlite
 *.sqlite3
 *.db
